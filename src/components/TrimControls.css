@@ -1,0 +1,84 @@
+/* Trim Controls Container */
+.trim-controls {
+  padding: 12px 24px;
+  border-bottom: 1px solid #2a2a2a;
+  background: #1a1a1a;
+  flex-shrink: 0;
+}
+
+.trim-controls-inner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* Trim Buttons */
+.btn-trim {
+  background: #2a2a2a;
+  color: #fff;
+  border: 1px solid #3a3a3a;
+  border-radius: 6px;
+  padding: 8px 16px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.btn-trim:hover:not(:disabled) {
+  background: #3a3a3a;
+  border-color: #4a9eff;
+  transform: translateY(-1px);
+}
+
+.btn-trim:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.btn-trim:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-trim.btn-clear {
+  background: #2a2020;
+  border-color: #443333;
+}
+
+.btn-trim.btn-clear:hover:not(:disabled) {
+  background: #3a2525;
+  border-color: #ff4a4a;
+}
+
+/* Trim Info Badges */
+.trim-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+
+.trim-badge {
+  padding: 6px 12px;
+  background: #2a2a2a;
+  border: 1px solid #3a3a3a;
+  border-radius: 4px;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  color: #4a9eff;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.trim-badge.duration {
+  background: rgba(74, 158, 255, 0.15);
+  border-color: #4a9eff;
+}
+
+.trim-info .separator {
+  color: #666;
+  font-size: 14px;
+}

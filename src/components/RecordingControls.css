@@ -1,0 +1,211 @@
+/* Recording Controls Container */
+.recording-controls {
+  position: relative;
+  display: inline-block;
+}
+
+/* Record Button (Not Recording) */
+.record-button-container {
+  position: relative;
+}
+
+.btn-record {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  background: linear-gradient(135deg, #ff4757 0%, #ff6348 100%);
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  box-shadow: 0 2px 8px rgba(255, 71, 87, 0.3);
+}
+
+.btn-record:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(255, 71, 87, 0.5);
+}
+
+.btn-record:active {
+  transform: translateY(0);
+}
+
+.record-icon {
+  font-size: 16px;
+}
+
+/* Recording Mode Dropdown */
+.recording-mode-dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  background: #2a2a2a;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  border: 1px solid #3a3a3a;
+  overflow: hidden;
+  z-index: 1000;
+  min-width: 280px;
+  animation: dropdownFadeIn 0.2s ease-out;
+}
+
+@keyframes dropdownFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.mode-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid #1a1a1a;
+  cursor: pointer;
+  transition: all 0.2s;
+  text-align: left;
+}
+
+.mode-option:last-child {
+  border-bottom: none;
+}
+
+.mode-option:hover {
+  background: #333;
+}
+
+.mode-icon {
+  font-size: 24px;
+  flex-shrink: 0;
+}
+
+.mode-details {
+  flex: 1;
+}
+
+.mode-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  margin-bottom: 2px;
+}
+
+.mode-desc {
+  font-size: 12px;
+  color: #888;
+}
+
+/* Recording Active State */
+.recording-active {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: rgba(255, 71, 87, 0.1);
+  border: 2px solid #ff4757;
+  border-radius: 8px;
+  animation: recordingPulse 2s ease-in-out infinite;
+}
+
+@keyframes recordingPulse {
+  0%, 100% {
+    border-color: #ff4757;
+  }
+  50% {
+    border-color: #ff6348;
+  }
+}
+
+.recording-indicator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.recording-dot {
+  width: 12px;
+  height: 12px;
+  background: #ff4757;
+  border-radius: 50%;
+  animation: recordingBlink 1.5s ease-in-out infinite;
+}
+
+@keyframes recordingBlink {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+.recording-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #ff4757;
+  text-transform: capitalize;
+}
+
+.recording-time {
+  font-family: 'Courier New', monospace;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+}
+
+/* Recording Actions */
+.recording-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-pause,
+.btn-stop-record {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 5px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-pause {
+  background: #ffa502;
+  color: white;
+}
+
+.btn-pause:hover {
+  background: #ff8800;
+  transform: translateY(-1px);
+}
+
+.btn-stop-record {
+  background: #ff4757;
+  color: white;
+}
+
+.btn-stop-record:hover {
+  background: #ff3838;
+  transform: translateY(-1px);
+}
+
+.btn-pause:active,
+.btn-stop-record:active {
+  transform: translateY(0);
+}
