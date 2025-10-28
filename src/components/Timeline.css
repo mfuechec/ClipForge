@@ -170,6 +170,11 @@
   border-color: rgba(255, 255, 255, 0.3);
 }
 
+.timeline-clip-block.selected {
+  border-color: #fbbf24;
+  box-shadow: 0 0 0 2px #fbbf24;
+}
+
 .clip-block-content {
   padding: 8px 12px;
   height: 100%;
@@ -212,31 +217,58 @@
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 2px;
+  width: 20px; /* Wider hit area for easier dragging */
+  margin-left: -9px; /* Center the wider area on the line */
   z-index: 100;
-  pointer-events: none;
+  pointer-events: auto; /* Enable pointer events for dragging */
+  cursor: ew-resize;
+  /* Transition is handled inline to disable during drag */
 }
 
 .playhead-line {
   position: absolute;
   top: 0;
   bottom: 0;
+  left: 9px; /* Center the 2px line in the 20px container */
   width: 2px;
   background: #ff4757;
   box-shadow: 0 0 8px rgba(255, 71, 87, 0.8);
+  animation: playhead-glow 2s ease-in-out infinite;
+  pointer-events: none; /* Line shouldn't interfere with dragging */
 }
 
 .playhead-handle {
   position: absolute;
   top: -4px;
-  left: 50%;
-  transform: translateX(-50%);
+  left: 4px; /* Position to align with the centered line (9px line center - 6px handle radius + 1px) */
   width: 12px;
   height: 12px;
   background: #ff4757;
   border: 2px solid #fff;
   border-radius: 50%;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  animation: playhead-pulse 2s ease-in-out infinite;
+  pointer-events: auto; /* Handle should be draggable */
+}
+
+@keyframes playhead-glow {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(255, 71, 87, 0.8);
+  }
+  50% {
+    box-shadow: 0 0 16px rgba(255, 71, 87, 1);
+  }
+}
+
+@keyframes playhead-pulse {
+  0%, 100% {
+    transform: translateX(-50%) scale(1);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  }
+  50% {
+    transform: translateX(-50%) scale(1.1);
+    box-shadow: 0 2px 12px rgba(255, 71, 87, 0.5);
+  }
 }
 
 /* Time Markers */
@@ -268,6 +300,34 @@
   white-space: nowrap;
   transform: translateX(-50%);
   text-align: center;
+}
+
+/* Drag Overlay Preview */
+.drag-overlay-preview {
+  padding: 10px 12px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-radius: 6px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  cursor: grabbing;
+  min-width: 180px;
+  max-width: 220px;
+}
+
+.drag-overlay-preview .clip-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-bottom: 4px;
+}
+
+.drag-overlay-preview .clip-meta {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.8);
+  font-family: 'Courier New', monospace;
 }
 
 /* Scrollbar Styling */

@@ -19,6 +19,43 @@ export function TimelineProvider({ children, clips }) {
     console.log('[TimelineContext] Provider received clips:', clips?.length || 0, 'clips');
   }, [clips]);
 
+  // Cleanup effect: Remove timeline clips that reference deleted clips
+  // and adjust clipIndex references when clips array changes
+  useEffect(() => {
+    setTimelineClips(prev => {
+      // Filter out timeline clips that reference non-existent clips
+      const validClips = prev.filter(tc => {
+        const clipExists = clips[tc.clipIndex] !== undefined;
+        if (!clipExists) {
+          console.log('[TimelineContext] Removing timeline clip - referenced clip no longer exists:', tc.id);
+        }
+        return clipExists;
+      });
+
+      // No need to adjust clipIndex values since they're array indices
+      // and will automatically point to the correct clips after deletion
+      return validClips;
+    });
+  }, [clips]);
+
+  // Helper: Calculate duration of a clip (accounting for trim points)
+  const calculateDuration = useCallback((clip) => {
+    if (!clip) return 0;
+    return (clip.trimEnd != null && clip.trimStart != null)
+      ? clip.trimEnd - clip.trimStart
+      : clip.duration || 0;
+  }, []);
+
+  // Helper: Reflow timeline clips to be sequential (no gaps)
+  const reflowTimeline = useCallback((timelineClipsArray, clipsArray) => {
+    let currentTime = 0;
+    return timelineClipsArray.map(tc => {
+      const startTime = currentTime;
+      currentTime += calculateDuration(clipsArray[tc.clipIndex]);
+      return { ...tc, startTime };
+    });
+  }, [calculateDuration]);
+
   // Calculate total timeline duration based on clips
   const totalDuration = useMemo(() => {
     if (timelineClips.length === 0) return 0;
@@ -27,9 +64,7 @@ export function TimelineProvider({ children, clips }) {
     timelineClips.forEach(timelineClip => {
       const clip = clips[timelineClip.clipIndex];
       if (clip) {
-        const duration = (clip.trimEnd != null && clip.trimStart != null)
-          ? clip.trimEnd - clip.trimStart
-          : clip.duration;
+        const duration = calculateDuration(clip);
         const endTime = timelineClip.startTime + duration;
         maxEndTime = Math.max(maxEndTime, endTime);
       }
@@ -37,7 +72,7 @@ export function TimelineProvider({ children, clips }) {
 
     console.log('[TimelineContext] Calculated totalDuration:', maxEndTime);
     return maxEndTime;
-  }, [timelineClips, clips]);
+  }, [timelineClips, clips, calculateDuration]);
 
   // Add a clip to the timeline at a specific time position
   const addClipToTimeline = useCallback((clipIndex, startTime = null, freshClips = null) => {
@@ -47,49 +82,41 @@ export function TimelineProvider({ children, clips }) {
     console.log('[TimelineContext] Adding clip', clipIndex, 'to timeline');
 
     setTimelineClips(prev => {
-      // If no start time provided, calculate position by finding end of last clip
-      let position = startTime !== null ? startTime : 0;
-
-      if (startTime === null && prev.length > 0) {
-        // Calculate the end position of all clips to find where to append
-        let maxEndTime = 0;
-        prev.forEach((tc) => {
-          const clip = clipsToUse[tc.clipIndex];
-
-          if (clip && clip.duration) {
-            const duration = (clip.trimEnd != null && clip.trimStart != null)
-              ? clip.trimEnd - clip.trimStart
-              : clip.duration;
-            const endTime = tc.startTime + duration;
-            maxEndTime = Math.max(maxEndTime, endTime);
-          }
-        });
-        position = maxEndTime;
-      }
-
-      // Safety check: if position is NaN, default to 0
-      if (isNaN(position)) {
-        console.error('[TimelineContext] Position is NaN! Defaulting to 0');
-        position = 0;
-      }
-
       // Create new timeline clip
       const newClip = {
         id: `timeline-clip-${Date.now()}-${Math.random()}`, // Unique ID for drag-and-drop
         clipIndex,
-        startTime: position
+        startTime: 0  // Temporary, will be set by reflow
       };
 
-      console.log('[TimelineContext] Clip added at position:', position);
+      // Add to end of timeline
+      const updatedClips = [...prev, newClip];
 
-      return [...prev, newClip];
+      // Reflow to ensure sequential arrangement
+      const reflowedClips = reflowTimeline(updatedClips, clipsToUse);
+
+      console.log('[TimelineContext] Clip added and timeline reflowed');
+
+      return reflowedClips;
     });
-  }, [clips]);
+  }, [clips, reflowTimeline]);
 
   // Remove a clip from the timeline
   const removeClipFromTimeline = useCallback((timelineClipId) => {
-    setTimelineClips(prev => prev.filter(tc => tc.id !== timelineClipId));
-  }, []);
+    console.log('[TimelineContext] Removing clip', timelineClipId, 'from timeline');
+
+    setTimelineClips(prev => {
+      // Remove the clip
+      const filtered = prev.filter(tc => tc.id !== timelineClipId);
+
+      // Reflow remaining clips to be sequential
+      const reflowedClips = reflowTimeline(filtered, clips);
+
+      console.log('[TimelineContext] Timeline reflowed after removal');
+
+      return reflowedClips;
+    });
+  }, [clips, reflowTimeline]);
 
   // Reorder clips on the timeline (for drag-and-drop within timeline)
   const reorderTimelineClips = useCallback((timelineClipId, newStartTime) => {
@@ -130,7 +157,9 @@ export function TimelineProvider({ children, clips }) {
 
   // Get the active clip at a given time
   const getActiveClipAtTime = useCallback((time) => {
-    for (const timelineClip of timelineClips) {
+    // Find the clip that contains this time
+    for (let i = 0; i < timelineClips.length; i++) {
+      const timelineClip = timelineClips[i];
       const clip = clips[timelineClip.clipIndex];
 
       if (!clip) {
@@ -142,8 +171,15 @@ export function TimelineProvider({ children, clips }) {
         : clip.duration;
 
       const endTime = timelineClip.startTime + duration;
+      const isLastClip = i === timelineClips.length - 1;
 
-      if (time >= timelineClip.startTime && time < endTime) {
+      // For the last clip, include the exact end time (use <=)
+      // This keeps the clip active when video reaches the end, allowing replay
+      const isInRange = isLastClip
+        ? (time >= timelineClip.startTime && time <= endTime)
+        : (time >= timelineClip.startTime && time < endTime);
+
+      if (isInRange) {
         // Calculate offset within the clip (accounting for trim)
         const offsetInClip = time - timelineClip.startTime;
         const actualClipTime = (clip.trimStart != null)
@@ -167,6 +203,23 @@ export function TimelineProvider({ children, clips }) {
     setPlayheadTime(0);
   }, []);
 
+  // Handle clip deletion from library - remove timeline clips and adjust indices
+  const handleClipDeleted = useCallback((deletedClipIndex) => {
+    setTimelineClips(prev => {
+      // Remove timeline clips that reference the deleted clip
+      const filtered = prev.filter(tc => tc.clipIndex !== deletedClipIndex);
+
+      // Adjust clipIndex for remaining clips that had higher indices
+      const adjusted = filtered.map(tc => ({
+        ...tc,
+        clipIndex: tc.clipIndex > deletedClipIndex ? tc.clipIndex - 1 : tc.clipIndex
+      }));
+
+      // Reflow to maintain sequential arrangement
+      return reflowTimeline(adjusted, clips);
+    });
+  }, [clips, reflowTimeline]);
+
   const value = {
     // State
     timelineClips,
@@ -179,7 +232,8 @@ export function TimelineProvider({ children, clips }) {
     reorderTimelineClips,
     seekPlayhead,
     getActiveClipAtTime,
-    clearTimeline
+    clearTimeline,
+    handleClipDeleted
   };
 
   return (

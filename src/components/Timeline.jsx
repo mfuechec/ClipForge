@@ -1,10 +1,10 @@
 import { useRef, useState } from 'react';
 import './Timeline.css';
-import { DndContext, useDraggable, useDroppable, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
+import { DndContext, DragOverlay, useDraggable, useDroppable, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
 import { useTimeline } from '../TimelineContext';
 
 // Draggable Media Library Item
-function DraggableMediaClip({ clip, index, isSelected, onSelect, onAddToTimeline, formatTime }) {
+function DraggableMediaClip({ clip, index, isSelected, onSelect, formatTime }) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `media-clip-${index}`,
     data: { type: 'media-clip', clipIndex: index }
@@ -31,16 +31,93 @@ function DraggableMediaClip({ clip, index, isSelected, onSelect, onAddToTimeline
           {clip.width && ` • ${clip.width}×${clip.height}`}
         </div>
       </div>
-      <button
-        className="btn-add-timeline"
-        onClick={(e) => {
-          e.stopPropagation();
-          onAddToTimeline && onAddToTimeline(index);
-        }}
-        disabled={!clip.duration}
-      >
-        + Add
-      </button>
+    </div>
+  );
+}
+
+// Droppable Media Library
+function MediaLibraryDroppable({ clips, selectedClipIndex, onClipSelect, formatTime }) {
+  const { setNodeRef } = useDroppable({
+    id: 'media-library'
+  });
+
+  return (
+    <div ref={setNodeRef} className="media-library">
+      {clips.length === 0 ? (
+        <div className="library-empty">
+          <p>No clips imported. Click "Import Video" to get started.</p>
+        </div>
+      ) : (
+        <div className="library-clips">
+          {clips.map((clip, index) => (
+            <DraggableMediaClip
+              key={index}
+              clip={clip}
+              index={index}
+              isSelected={index === selectedClipIndex}
+              onSelect={onClipSelect}
+              formatTime={formatTime}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Draggable Timeline Clip Block
+function DraggableTimelineClip({ timelineClip, clip, getPixelWidth, formatTime, onClipSelect, isSelected, onTimelineClipSelect }) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: timelineClip.id,
+    data: {
+      type: 'timeline-clip',
+      timelineClipId: timelineClip.id,
+      clipIndex: timelineClip.clipIndex
+    }
+  });
+
+  const clipDuration = (clip.trimEnd != null && clip.trimStart != null)
+    ? clip.trimEnd - clip.trimStart
+    : clip.duration;
+
+  const style = {
+    left: `${getPixelWidth(timelineClip.startTime)}px`,
+    width: `${getPixelWidth(clipDuration)}px`,
+    opacity: isDragging ? 0.5 : 1,
+    cursor: isDragging ? 'grabbing' : 'grab'
+  };
+
+  const handleClick = () => {
+    // Update media library selection to this clip
+    if (onClipSelect) {
+      onClipSelect(timelineClip.clipIndex);
+    }
+    // Set this as the selected timeline clip
+    if (onTimelineClipSelect) {
+      onTimelineClipSelect(timelineClip.id);
+    }
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      key={timelineClip.id}
+      className={`timeline-clip-block ${isSelected ? 'selected' : ''}`}
+      style={style}
+      onClick={handleClick}
+      {...listeners}
+      {...attributes}
+    >
+      <div className="clip-block-content">
+        <div className="clip-block-name">{clip.filename}</div>
+        <div className="clip-block-duration">{formatTime(clipDuration)}</div>
+      </div>
+
+      {/* Trim indicators - only show if actually trimmed */}
+      {(clip.trimStart != null && clip.trimStart > 0) ||
+       (clip.trimEnd != null && clip.trimEnd < clip.duration) ? (
+        <div className="clip-trimmed-badge">Trimmed</div>
+      ) : null}
     </div>
   );
 }
@@ -53,13 +130,15 @@ function DraggablePlayhead({ playheadTime, getPixelWidth }) {
     data: { type: 'playhead' }
   });
 
-  // Calculate position with transform applied during drag
+  // Calculate position - DON'T use transform during drag because we're updating
+  // playheadTime via seekPlayhead in onDragMove. Using transform would cause double movement.
   const baseLeft = getPixelWidth(playheadTime);
-  const currentLeft = transform ? baseLeft + transform.x : baseLeft;
 
   const style = {
-    left: `${currentLeft}px`,
-    cursor: isDragging ? 'grabbing' : 'ew-resize'
+    left: `${baseLeft}px`,
+    cursor: isDragging ? 'grabbing' : 'ew-resize',
+    // No transition - position updates are controlled by state changes, not CSS
+    transition: 'none'
   };
 
   return (
@@ -79,11 +158,14 @@ function DraggablePlayhead({ playheadTime, getPixelWidth }) {
 function Timeline({
   clips,
   onClipSelect,
-  onAddToTimeline,
-  selectedClipIndex
+  selectedClipIndex,
+  selectedTimelineClipId,
+  onTimelineClipSelect
 }) {
-  const { timelineClips, playheadTime, totalDuration, addClipToTimeline, seekPlayhead } = useTimeline();
+  const { timelineClips, playheadTime, totalDuration, addClipToTimeline, removeClipFromTimeline, seekPlayhead } = useTimeline();
   const timelineTrackRef = useRef(null);
+  const [activeId, setActiveId] = useState(null);
+  const dragStartTimeRef = useRef(0);
 
   // Configure drag sensors
   const sensors = useSensors(
@@ -107,22 +189,44 @@ function Timeline({
     return duration * pixelsPerSecond;
   };
 
+  // Handle drag start - track what's being dragged
+  const handleDragStart = (event) => {
+    setActiveId(event.active.id);
+
+    // Store initial playhead time when starting to drag playhead
+    if (event.active.data.current?.type === 'playhead') {
+      dragStartTimeRef.current = playheadTime;
+    }
+  };
+
+  // Handle drag move - update playhead position in real-time
+  const handleDragMove = (event) => {
+    const { active, delta } = event;
+    const dragType = active.data.current?.type;
+
+    // Handle playhead dragging - update in real-time
+    if (dragType === 'playhead') {
+      const pixelsPerSecond = 20;
+      const timeDelta = delta.x / pixelsPerSecond;
+      // Use the stored start time, not current playhead time
+      const newTime = Math.max(0, Math.min(dragStartTimeRef.current + timeDelta, totalDuration));
+      seekPlayhead(newTime);
+    }
+  };
+
   // Handle drag end - add clip to timeline or seek playhead
   const handleDragEnd = (event) => {
+    setActiveId(null);
     const { active, over, delta } = event;
 
     const dragType = active.data.current?.type;
 
-    // Handle playhead dragging
+    // Handle playhead dragging - final position already set by onDragMove
     if (dragType === 'playhead') {
-      const pixelsPerSecond = 20;
-      const timeDelta = delta.x / pixelsPerSecond;
-      const newTime = Math.max(0, Math.min(playheadTime + timeDelta, totalDuration));
-      seekPlayhead(newTime);
       return;
     }
 
-    // Handle clip dragging to timeline
+    // Handle media clip dragging to timeline
     if (dragType === 'media-clip' && over?.id === 'timeline-track') {
       const clipIndex = active.data.current.clipIndex;
       const clip = clips[clipIndex];
@@ -132,38 +236,60 @@ function Timeline({
         return;
       }
 
-      // For now, just append to the end of the timeline
-      // TODO: Calculate precise drop position based on mouse coordinates
+      // Append to the end of the timeline (sequential arrangement)
       // Pass clips array to ensure fresh data
       addClipToTimeline(clipIndex, null, clips);
+      return;
+    }
+
+    // Handle timeline clip dragging to nowhere (remove from timeline)
+    if (dragType === 'timeline-clip' && !over) {
+      const timelineClipId = active.data.current.timelineClipId;
+      console.log('[Timeline] Removing clip from timeline (dragged to nowhere):', timelineClipId);
+      removeClipFromTimeline(timelineClipId);
+      return;
+    }
+
+    // Handle timeline clip dragging back to media library (remove from timeline)
+    if (dragType === 'timeline-clip' && over?.id === 'media-library') {
+      const timelineClipId = active.data.current.timelineClipId;
+      console.log('[Timeline] Removing clip from timeline (dragged to library):', timelineClipId);
+      removeClipFromTimeline(timelineClipId);
+      return;
     }
   };
 
+  // Get the active dragged item data
+  const getActiveItem = () => {
+    if (!activeId) return null;
+
+    // Check if it's a media clip
+    if (activeId.startsWith('media-clip-')) {
+      const index = parseInt(activeId.replace('media-clip-', ''));
+      return { type: 'media-clip', clip: clips[index], index };
+    }
+
+    // Check if it's a timeline clip
+    const timelineClip = timelineClips.find(tc => tc.id === activeId);
+    if (timelineClip) {
+      return { type: 'timeline-clip', clip: clips[timelineClip.clipIndex], timelineClip };
+    }
+
+    return null;
+  };
+
+  const activeItem = getActiveItem();
+
   return (
-    <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
+    <DndContext sensors={sensors} onDragStart={handleDragStart} onDragMove={handleDragMove} onDragEnd={handleDragEnd}>
       <div className="timeline">
         {/* Media Library Section */}
-        <div className="media-library">
-          {clips.length === 0 ? (
-            <div className="library-empty">
-              <p>No clips imported. Click "Import Video" to get started.</p>
-            </div>
-          ) : (
-            <div className="library-clips">
-              {clips.map((clip, index) => (
-                <DraggableMediaClip
-                  key={index}
-                  clip={clip}
-                  index={index}
-                  isSelected={index === selectedClipIndex}
-                  onSelect={onClipSelect}
-                  onAddToTimeline={onAddToTimeline}
-                  formatTime={formatTime}
-                />
-              ))}
-            </div>
-          )}
-        </div>
+        <MediaLibraryDroppable
+          clips={clips}
+          selectedClipIndex={selectedClipIndex}
+          onClipSelect={onClipSelect}
+          formatTime={formatTime}
+        />
 
         {/* Timeline Track Section */}
         <TimelineTrackDroppable
@@ -174,8 +300,22 @@ function Timeline({
           getPixelWidth={getPixelWidth}
           formatTime={formatTime}
           onClipSelect={onClipSelect}
+          selectedTimelineClipId={selectedTimelineClipId}
+          onTimelineClipSelect={onTimelineClipSelect}
         />
       </div>
+
+      {/* Drag Overlay - shows preview of dragged item */}
+      <DragOverlay>
+        {activeItem && (
+          <div className="drag-overlay-preview">
+            <div className="clip-name">{activeItem.clip?.filename}</div>
+            {activeItem.clip?.duration && (
+              <div className="clip-meta">{formatTime(activeItem.clip.duration)}</div>
+            )}
+          </div>
+        )}
+      </DragOverlay>
     </DndContext>
   );
 }
@@ -188,7 +328,9 @@ function TimelineTrackDroppable({
   playheadTime,
   getPixelWidth,
   formatTime,
-  onClipSelect
+  onClipSelect,
+  selectedTimelineClipId,
+  onTimelineClipSelect
 }) {
   const { setNodeRef, isOver } = useDroppable({
     id: 'timeline-track'
@@ -202,7 +344,13 @@ function TimelineTrackDroppable({
 
   // Handle click-to-seek on timeline
   const handleTimelineClick = (e) => {
-    // Only handle clicks directly on the timeline track, not on clips or playhead
+    // Ignore clicks on playhead or clips
+    if (e.target.closest('.playhead') ||
+        e.target.closest('.timeline-clip-block')) {
+      return;
+    }
+
+    // Only handle clicks directly on the timeline track
     if (e.target.classList.contains('timeline-track') ||
         e.target.classList.contains('timeline-track-container')) {
       const trackElement = trackRef.current;
@@ -243,31 +391,17 @@ function TimelineTrackDroppable({
               const clip = clips[tc.clipIndex];
               if (!clip) return null;
 
-              const clipDuration = (clip.trimEnd != null && clip.trimStart != null)
-                ? clip.trimEnd - clip.trimStart
-                : clip.duration;
-
               return (
-                <div
+                <DraggableTimelineClip
                   key={tc.id}
-                  className="timeline-clip-block"
-                  style={{
-                    left: `${getPixelWidth(tc.startTime)}px`,
-                    width: `${getPixelWidth(clipDuration)}px`
-                  }}
-                  onClick={() => onClipSelect && onClipSelect(tc.clipIndex)}
-                >
-                  <div className="clip-block-content">
-                    <div className="clip-block-name">{clip.filename}</div>
-                    <div className="clip-block-duration">{formatTime(clipDuration)}</div>
-                  </div>
-
-                  {/* Trim indicators - only show if actually trimmed */}
-                  {(clip.trimStart != null && clip.trimStart > 0) ||
-                   (clip.trimEnd != null && clip.trimEnd < clip.duration) ? (
-                    <div className="clip-trimmed-badge">Trimmed</div>
-                  ) : null}
-                </div>
+                  timelineClip={tc}
+                  clip={clip}
+                  getPixelWidth={getPixelWidth}
+                  formatTime={formatTime}
+                  onClipSelect={onClipSelect}
+                  isSelected={tc.id === selectedTimelineClipId}
+                  onTimelineClipSelect={onTimelineClipSelect}
+                />
               );
             })}
 

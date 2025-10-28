@@ -10,11 +10,9 @@ import { TimelineProvider, useTimeline } from './TimelineContext';
 
 function AppContent({ clips, setClips }) {
   const [selectedClipIndex, setSelectedClipIndex] = useState(null);
+  const [selectedTimelineClipId, setSelectedTimelineClipId] = useState(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [isExporting, setIsExporting] = useState(false);
-
-  // Track last added clip to prevent rapid duplicates
-  const lastAddedRef = useRef({ clipIndex: null, timestamp: 0 });
 
   // Get timeline state and functions from context
   const {
@@ -22,9 +20,11 @@ function AppContent({ clips, setClips }) {
     playheadTime,
     totalDuration,
     addClipToTimeline,
+    removeClipFromTimeline,
     seekPlayhead,
     getActiveClipAtTime,
-    clearTimeline
+    clearTimeline,
+    handleClipDeleted
   } = useTimeline();
 
   // Debug hook - access clips in console via window.__clips
@@ -79,40 +79,10 @@ function AppContent({ clips, setClips }) {
 
   const handleClipSelect = (index) => {
     setSelectedClipIndex(index);
+    setSelectedTimelineClipId(null); // Clear timeline selection
     setCurrentTime(0);
   };
 
-  const handleAddToTimeline = useCallback((clipIndex) => {
-    const now = Date.now();
-    const timeSinceLastAdd = now - lastAddedRef.current.timestamp;
-
-    console.log('[App] handleAddToTimeline called with clipIndex:', clipIndex);
-
-    // Prevent duplicate additions within 500ms
-    if (lastAddedRef.current.clipIndex === clipIndex && timeSinceLastAdd < 500) {
-      console.warn('[App] Duplicate add prevented - same clip within 500ms');
-      return;
-    }
-
-    const clip = clips[clipIndex];
-    console.log('[App] Clip data:', clip);
-    console.log('[App] Clip has duration?', !!clip?.duration, 'Duration value:', clip?.duration);
-
-    if (!clip || !clip.duration) {
-      console.error('[App] Clip missing or no duration. Clip:', clip);
-      alert('Please wait for the clip to load before adding to timeline');
-      return;
-    }
-
-    console.log('[App] Adding clip to timeline:', clip.filename);
-
-    // Update last added tracker
-    lastAddedRef.current = { clipIndex, timestamp: now };
-
-    // Add to timeline (context will calculate position)
-    // Pass the clips array so context has fresh data
-    addClipToTimeline(clipIndex, null, clips);
-  }, [clips, addClipToTimeline]);
 
   const handleVideoLoaded = useCallback((metadata) => {
     // When a video loads, update the clip metadata ONLY if it's missing
@@ -217,6 +187,71 @@ function AppContent({ clips, setClips }) {
       });
     }
   }, [selectedClipIndex]);
+
+  const handleDeleteClip = useCallback((clipIndex) => {
+    const clip = clips[clipIndex];
+
+    if (!clip) {
+      console.error('[App] Attempted to delete non-existent clip at index:', clipIndex);
+      return;
+    }
+
+    // Check if clip is used in timeline
+    const usedInTimeline = timelineClips.some(tc => tc.clipIndex === clipIndex);
+
+    const message = usedInTimeline
+      ? `Delete "${clip.filename}"?\n\nThis will remove it from the timeline and media library.`
+      : `Delete "${clip.filename}"?\n\nThis cannot be undone.`;
+
+    if (window.confirm(message)) {
+      console.log('[App] Deleting clip at index:', clipIndex, clip.filename);
+
+      // Clear selection if deleting the selected clip
+      if (selectedClipIndex === clipIndex) {
+        setSelectedClipIndex(null);
+      } else if (selectedClipIndex !== null && selectedClipIndex > clipIndex) {
+        // Adjust selection index if it's after the deleted clip
+        setSelectedClipIndex(selectedClipIndex - 1);
+      }
+
+      // Notify timeline context to clean up before deletion
+      handleClipDeleted(clipIndex);
+
+      // Remove from clips array
+      setClips(prevClips => prevClips.filter((_, idx) => idx !== clipIndex));
+    }
+  }, [clips, timelineClips, selectedClipIndex, handleClipDeleted]);
+
+  // Keyboard event handler for Delete/Backspace - must be after handleDeleteClip
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // Check if Delete or Backspace was pressed
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        // Prevent default backspace navigation
+        if (e.key === 'Backspace' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+          e.preventDefault();
+        }
+
+        // Priority 1: If a timeline clip is selected, remove it from timeline
+        if (selectedTimelineClipId) {
+          console.log('[App] Removing timeline clip via keyboard:', selectedTimelineClipId);
+          removeClipFromTimeline(selectedTimelineClipId);
+          setSelectedTimelineClipId(null);
+          return;
+        }
+
+        // Priority 2: If a media library clip is selected, delete it
+        if (selectedClipIndex !== null) {
+          console.log('[App] Deleting media library clip via keyboard:', selectedClipIndex);
+          handleDeleteClip(selectedClipIndex);
+          return;
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedTimelineClipId, selectedClipIndex, removeClipFromTimeline, handleDeleteClip]);
 
   const handleExportVideo = async () => {
     try {
@@ -423,8 +458,9 @@ function AppContent({ clips, setClips }) {
           <Timeline
             clips={clips}
             onClipSelect={handleClipSelect}
-            onAddToTimeline={handleAddToTimeline}
             selectedClipIndex={selectedClipIndex}
+            selectedTimelineClipId={selectedTimelineClipId}
+            onTimelineClipSelect={setSelectedTimelineClipId}
           />
         </div>
       </div>

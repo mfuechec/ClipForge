@@ -24,9 +24,23 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
   useEffect(() => {
     console.log('[VideoPlayer] Effect running - videoPath:', videoPath, 'element exists:', !!videoRef.current);
 
-    // Need both element and path to proceed
-    if (!videoRef.current || !videoPath) {
-      console.log('[VideoPlayer] Skipping - missing element or path');
+    // Need element to proceed
+    if (!videoRef.current) {
+      console.log('[VideoPlayer] Skipping - video element not in DOM yet');
+      return;
+    }
+
+    // If no videoPath, pause and clear source but keep player alive
+    if (!videoPath) {
+      if (playerRef.current) {
+        console.log('[VideoPlayer] No videoPath - pausing and hiding player');
+        try {
+          playerRef.current.pause();
+        } catch (error) {
+          console.warn('[VideoPlayer] Error pausing player:', error);
+        }
+      }
+      setIsPlaying(false);
       return;
     }
 
@@ -73,6 +87,12 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
       player.on('play', () => setIsPlaying(true));
       player.on('pause', () => setIsPlaying(false));
 
+      // Handle video end - pause instead of showing ended state
+      player.on('ended', () => {
+        console.log('[VideoPlayer] Video ended - pausing to allow replay');
+        player.pause();
+      });
+
       console.log('[VideoPlayer] Player created and event listeners attached');
     }
 
@@ -82,17 +102,22 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
       src: convertFileSrc(videoPath),
       type: 'video/mp4'
     });
+  }, [videoPath]); // Only re-run when videoPath changes
 
-    // Cleanup ONLY on unmount (not on videoPath change)
+  // Cleanup on component unmount only
+  useEffect(() => {
     return () => {
-      // Only dispose if we're actually unmounting (videoPath becomes null/undefined)
-      if (!videoPath && playerRef.current) {
+      if (playerRef.current) {
         console.log('[VideoPlayer] Disposing player on unmount');
-        playerRef.current.dispose();
+        try {
+          playerRef.current.dispose();
+        } catch (error) {
+          console.warn('[VideoPlayer] Error disposing player on unmount:', error);
+        }
         playerRef.current = null;
       }
     };
-  }, [videoPath]); // Only re-run when videoPath changes
+  }, []);
 
   // Handle external currentTime changes
   useEffect(() => {
@@ -125,74 +150,79 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
 
   return (
     <div className="video-player">
-      {videoPath ? (
-        <>
-          <div
-            className="video-container"
-            data-vjs-player
+      {/* Video element - always in DOM to prevent mount/unmount issues */}
+      <div
+        className="video-container"
+        data-vjs-player
+        style={{ display: videoPath ? 'block' : 'none' }}
+      >
+        <video
+          ref={videoRef}
+          className="video-js vjs-default-skin vjs-big-play-centered"
+          playsInline
+          style={{
+            width: '100%',
+            maxWidth: '90%',
+            aspectRatio: '16/9',
+            willChange: 'transform',
+            transform: 'translateZ(0)',
+            borderRadius: '8px'
+          }}
+        />
+      </div>
+
+      {/* Playback controls - only show when video is loaded */}
+      {videoPath && (
+        <div className="playback-controls">
+          <button
+            className={`btn-play-pause ${isPlaying ? 'playing' : 'paused'}`}
+            onClick={handlePlayPause}
+            title={isPlaying ? 'Pause' : 'Play'}
           >
-            <video
-              ref={videoRef}
-              className="video-js vjs-default-skin vjs-big-play-centered"
-              playsInline
-              style={{
-                width: '100%',
-                maxWidth: '90%',
-                aspectRatio: '16/9',
-                willChange: 'transform',
-                transform: 'translateZ(0)',
-                borderRadius: '8px'
-              }}
-            />
-          </div>
-          <div className="playback-controls">
-            <button
-              className={`btn-play-pause ${isPlaying ? 'playing' : 'paused'}`}
-              onClick={handlePlayPause}
-              title={isPlaying ? 'Pause' : 'Play'}
-            >
-              {isPlaying ? '⏸' : '▶'}
-            </button>
-            <span className="playback-label">Speed:</span>
-            <button
-              className={`speed-btn ${playbackRate === 0.5 ? 'active' : ''}`}
-              onClick={() => handlePlaybackRateChange(0.5)}
-            >
-              0.5x
-            </button>
-            <button
-              className={`speed-btn ${playbackRate === 1.0 ? 'active' : ''}`}
-              onClick={() => handlePlaybackRateChange(1.0)}
-            >
-              1x
-            </button>
-            <button
-              className={`speed-btn ${playbackRate === 1.5 ? 'active' : ''}`}
-              onClick={() => handlePlaybackRateChange(1.5)}
-            >
-              1.5x
-            </button>
-            <button
-              className={`speed-btn ${playbackRate === 2.0 ? 'active' : ''}`}
-              onClick={() => handlePlaybackRateChange(2.0)}
-            >
-              2x
-            </button>
-            <button
-              className={`speed-btn ${playbackRate === 3.0 ? 'active' : ''}`}
-              onClick={() => handlePlaybackRateChange(3.0)}
-            >
-              3x
-            </button>
-            <span className="current-rate">Current: {playbackRate}x</span>
-          </div>
-        </>
-      ) : (
+            {isPlaying ? '⏸' : '▶'}
+          </button>
+          <span className="playback-label">Speed:</span>
+          <button
+            className={`speed-btn ${playbackRate === 0.5 ? 'active' : ''}`}
+            onClick={() => handlePlaybackRateChange(0.5)}
+          >
+            0.5x
+          </button>
+          <button
+            className={`speed-btn ${playbackRate === 1.0 ? 'active' : ''}`}
+            onClick={() => handlePlaybackRateChange(1.0)}
+          >
+            1x
+          </button>
+          <button
+            className={`speed-btn ${playbackRate === 1.5 ? 'active' : ''}`}
+            onClick={() => handlePlaybackRateChange(1.5)}
+          >
+            1.5x
+          </button>
+          <button
+            className={`speed-btn ${playbackRate === 2.0 ? 'active' : ''}`}
+            onClick={() => handlePlaybackRateChange(2.0)}
+          >
+            2x
+          </button>
+          <button
+            className={`speed-btn ${playbackRate === 3.0 ? 'active' : ''}`}
+            onClick={() => handlePlaybackRateChange(3.0)}
+          >
+            3x
+          </button>
+          <span className="current-rate">Current: {playbackRate}x</span>
+        </div>
+      )}
+
+      {/* Placeholder - only show when no video */}
+      {!videoPath && (
         <div className="video-placeholder">
           <div className="placeholder-content">
             <div className="placeholder-icon">🎬</div>
             <p className="placeholder-text">No video loaded</p>
-            <p className="placeholder-hint">Click "Import Video" to get started</p>
+            <p className="placeholder-hint">Add clips to the timeline to preview</p>
           </div>
         </div>
       )}
