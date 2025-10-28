@@ -277,6 +277,67 @@ ClipForge/
   - `src/components/Timeline.jsx:28, 65` (removed headers)
   - `src/components/TrimControls.css:3, 13, 22, 59, 65` (compact controls)
 
+### ⚠️ Problem 9: Video.js Initialization DOM Warning (RESOLVED)
+- **Status**: ✅ RESOLVED - Fixed with callback refs pattern
+- **Date**: October 27, 2025
+- **Symptoms**:
+  - Warning: "VIDEOJS: WARN - The element supplied is not included in the DOM"
+  - Video would stop playing after ~0.5 seconds
+  - Player being disposed and recreated unexpectedly
+- **Root Cause**:
+  - Video element conditionally rendered based on videoPath (`{videoPath ? <video/> : <placeholder/>}`)
+  - useEffect with callback dependencies (`onVideoLoaded`, `onTimeUpdate`) re-ran when callbacks changed
+  - Player was disposed and recreated on every callback change, causing video to stop
+  - Initial mount: element didn't exist yet when useEffect ran
+- **Fix**:
+  1. **Store callbacks in refs** to prevent effect re-runs:
+     ```javascript
+     const onTimeUpdateRef = useRef(onTimeUpdate);
+     const onVideoLoadedRef = useRef(onVideoLoaded);
+
+     // Update refs when callbacks change (separate effect)
+     useEffect(() => {
+       onTimeUpdateRef.current = onTimeUpdate;
+       onVideoLoadedRef.current = onVideoLoaded;
+     }, [onTimeUpdate, onVideoLoaded]);
+     ```
+  2. **Use refs in event listeners** instead of callback directly:
+     ```javascript
+     player.on('timeupdate', () => {
+       if (onTimeUpdateRef.current) {
+         onTimeUpdateRef.current(player.currentTime());
+       }
+     });
+     ```
+  3. **Single dependency** - only re-run effect when videoPath changes:
+     ```javascript
+     useEffect(() => {
+       // ... player initialization
+     }, [videoPath]); // Only videoPath, not callbacks
+     ```
+  4. **Check for both element and path** before initializing:
+     ```javascript
+     if (!videoRef.current || !videoPath) {
+       return; // Skip if missing
+     }
+     ```
+  5. **Create player once, update source** when path changes:
+     ```javascript
+     if (!playerRef.current) {
+       // Create new player
+       playerRef.current = videojs(videoRef.current, {...});
+     }
+     // Always update source (new or existing player)
+     playerRef.current.src({src: convertFileSrc(videoPath), type: 'video/mp4'});
+     ```
+- **Result**:
+  - No more DOM warnings
+  - Player created once and reused
+  - Video plays continuously without stopping
+  - Source updates seamlessly when timeline changes
+- **Location**: `src/components/VideoPlayer.jsx:13-95`
+- **Key Pattern**: Use refs for callbacks that shouldn't trigger effects, only re-run when actual data (videoPath) changes
+
 ## State Management Architecture
 
 ### App.jsx State
