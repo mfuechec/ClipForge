@@ -17,6 +17,8 @@ function AppContent({ clips, setClips }) {
   const [isExporting, setIsExporting] = useState(false);
   const [isTrimMode, setIsTrimMode] = useState(false);
   const [trimStartTime, setTrimStartTime] = useState(null); // Track where trim selection started
+  const [isClipMode, setIsClipMode] = useState(false);
+  const [clipStartTime, setClipStartTime] = useState(null); // Track where clip selection started
   const [mediaLibraryCollapsed, setMediaLibraryCollapsed] = useState(true);
   const [transcriptCollapsed, setTranscriptCollapsed] = useState(true);
   const [activeId, setActiveId] = useState(null);
@@ -34,7 +36,8 @@ function AppContent({ clips, setClips }) {
     seekPlayhead,
     getActiveClipAtTime,
     clearTimeline,
-    handleClipDeleted
+    handleClipDeleted,
+    getClipExtractionParams
   } = useTimeline();
 
   // Transcript data - per clip transcripts stored by video path
@@ -286,11 +289,150 @@ function AppContent({ clips, setClips }) {
     }
   }, [clips, timelineClips, selectedClipIndex, handleClipDeleted]);
 
-  // Keyboard event handler for Delete/Backspace and 't' for trim
+  // Handle clip mode toggle/action (called by both button and keyboard)
+  const handleClipModeAction = useCallback(() => {
+    // If no clips on timeline, ignore
+    if (timelineClips.length === 0) {
+      return;
+    }
+
+    // If clip selection not started, start clip selection at current playhead
+    if (clipStartTime === null) {
+      console.log('[App] Starting clip selection at playhead:', playheadTime);
+      setClipStartTime(playheadTime);
+      setIsClipMode(true);
+      return;
+    }
+
+    // If clip selection already started, complete the clip extraction
+    console.log('[App] Completing clip extraction from', clipStartTime, 'to', playheadTime);
+
+    const startTime = Math.min(clipStartTime, playheadTime);
+    const endTime = Math.max(clipStartTime, playheadTime);
+
+    // Ignore if selection is too small
+    if (Math.abs(endTime - startTime) < 0.1) {
+      console.log('[App] Clip selection too small, ignoring');
+      setClipStartTime(null);
+      setIsClipMode(false);
+      return;
+    }
+
+    // Find which timeline clip(s) contain the selected region
+    // For simplicity, we'll only extract from the first affected clip
+    const affectedClips = [];
+
+    for (const timelineClip of timelineClips) {
+      const clip = clips[timelineClip.clipIndex];
+      if (!clip) continue;
+
+      // Use timeline clip's trim points
+      const clipDuration = (timelineClip.trimEnd != null && timelineClip.trimStart != null)
+        ? timelineClip.trimEnd - timelineClip.trimStart
+        : clip.duration;
+
+      const clipEndTime = timelineClip.startTime + clipDuration;
+
+      // Check if this clip overlaps with the selection
+      if (timelineClip.startTime < endTime && clipEndTime > startTime) {
+        affectedClips.push({ timelineClip, clip, clipEndTime, clipDuration });
+      }
+    }
+
+    if (affectedClips.length === 0) {
+      console.log('[App] No clips found in clip selection');
+      setClipStartTime(null);
+      setIsClipMode(false);
+      return;
+    }
+
+    // Extract from the first affected clip
+    const { timelineClip, clipDuration } = affectedClips[0];
+    const timelineClipStartTime = timelineClip.startTime;
+    const selectionStartInClip = Math.max(0, startTime - timelineClipStartTime);
+    const selectionEndInClip = Math.min(clipDuration, endTime - timelineClipStartTime);
+
+    console.log('[App] Extracting clip section:', {
+      timelineClipId: timelineClip.id,
+      extractStart: selectionStartInClip,
+      extractEnd: selectionEndInClip
+    });
+
+    // Call extraction function
+    handleExtractClip(timelineClip.id, selectionStartInClip, selectionEndInClip);
+
+    // Reset clip mode state
+    setClipStartTime(null);
+    setIsClipMode(false);
+  }, [clipStartTime, playheadTime, timelineClips, clips]);
+
+  // Extract a clip section and add to media library
+  const handleExtractClip = async (timelineClipId, extractStart, extractEnd) => {
+    try {
+      console.log('[App] Extracting clip from timeline clip:', timelineClipId, 'from', extractStart, 'to', extractEnd);
+
+      // Get extraction parameters
+      const params = getClipExtractionParams(timelineClipId, extractStart, extractEnd);
+      if (!params) {
+        console.error('[App] Failed to get extraction parameters');
+        alert('Failed to extract clip: Could not find clip');
+        return;
+      }
+
+      const { sourceClip, trimStart, trimEnd, duration } = params;
+      console.log('[App] Extraction params:', { sourceClip: sourceClip.filename, trimStart, trimEnd, duration });
+
+      // Generate output filename automatically
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+      const baseName = sourceClip.filename.replace(/\.[^/.]+$/, '');
+      const extension = sourceClip.filename.match(/\.[^/.]+$/)?.[0] || '.mp4';
+      const outputFilename = `${baseName}_clip_${timestamp}${extension}`;
+
+      // Save to same directory as source clip
+      const sourceDir = sourceClip.path.substring(0, sourceClip.path.lastIndexOf('/'));
+      const outputPath = `${sourceDir}/${outputFilename}`;
+
+      console.log('[App] Extracting to:', outputPath);
+      setIsExporting(true);
+
+      // Call Rust backend to extract the clip
+      const result = await invoke('export_video', {
+        options: {
+          input_path: sourceClip.path,
+          output_path: outputPath,
+          trim_start: trimStart,
+          trim_end: trimEnd
+        }
+      });
+
+      console.log('[App] Extraction successful:', result);
+
+      // Import the extracted clip back into the library
+      const metadata = await invoke('import_video', { path: result });
+      console.log('[App] Imported extracted clip:', metadata);
+
+      setClips([...clips, metadata]);
+      console.log(`[App] Clip extracted successfully! Duration: ${duration.toFixed(2)}s - Added to media library`);
+    } catch (error) {
+      console.error('[App] Extraction failed:', error);
+      alert(`Clip extraction failed: ${error}`);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  // Keyboard event handler for Delete/Backspace, 't' for trim, and 'c' for clip
   useEffect(() => {
     const handleKeyDown = (e) => {
       // Ignore if typing in an input field
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+        return;
+      }
+
+      // Handle 'c' key for clip mode
+      if (e.key === 'c' || e.key === 'C') {
+        e.preventDefault();
+        handleClipModeAction();
         return;
       }
 
@@ -356,9 +498,9 @@ function AppContent({ clips, setClips }) {
         const { timelineClip, clip, clipEndTime, clipDuration } = affectedClips[0];
 
         // Calculate where the selection intersects with this clip on the timeline
-        const clipStartTime = timelineClip.startTime;
-        const selectionStartInClip = Math.max(0, startTime - clipStartTime);
-        const selectionEndInClip = Math.min(clipDuration, endTime - clipStartTime);
+        const timelineClipStartTime = timelineClip.startTime;
+        const selectionStartInClip = Math.max(0, startTime - timelineClipStartTime);
+        const selectionEndInClip = Math.min(clipDuration, endTime - timelineClipStartTime);
 
         // Determine trim type based on selection position
         const startThreshold = clipDuration * 0.1; // First 10%
@@ -422,7 +564,7 @@ function AppContent({ clips, setClips }) {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedTimelineClipId, selectedClipIndex, removeClipFromTimeline, handleDeleteClip, trimStartTime, playheadTime, timelineClips, clips, updateTimelineClipTrim, splitTimelineClip]);
+  }, [selectedTimelineClipId, selectedClipIndex, removeClipFromTimeline, handleDeleteClip, trimStartTime, clipStartTime, playheadTime, timelineClips, clips, updateTimelineClipTrim, splitTimelineClip, handleClipModeAction]);
 
   const handleExportVideo = async () => {
     try {
@@ -721,6 +863,14 @@ function AppContent({ clips, setClips }) {
           >
             {trimStartTime !== null ? '✂️ Trimming... (press T)' : '✂️ Trim Mode (press T)'}
           </button>
+          <button
+            className={`btn-secondary ${isClipMode ? 'active' : ''}`}
+            onClick={handleClipModeAction}
+            disabled={timelineClips.length === 0 || isExporting}
+            title="Click or press 'c' to start/complete clip extraction at playhead position"
+          >
+            {clipStartTime !== null ? '📋 Extracting... (press C)' : '📋 Clip Mode (press C)'}
+          </button>
         </div>
         <Timeline
           clips={clips}
@@ -730,6 +880,8 @@ function AppContent({ clips, setClips }) {
           onTimelineClipSelect={setSelectedTimelineClipId}
           isTrimMode={isTrimMode}
           trimStartTime={trimStartTime}
+          isClipMode={isClipMode}
+          clipStartTime={clipStartTime}
         />
       </div>
 

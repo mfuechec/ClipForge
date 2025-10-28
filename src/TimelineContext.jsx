@@ -302,6 +302,39 @@ export function TimelineProvider({ children, clips }) {
     });
   }, [clips, reflowTimeline]);
 
+  // Calculate extraction parameters for a clip section
+  // Returns the source clip and the exact trim points to extract
+  const getClipExtractionParams = useCallback((timelineClipId, extractStart, extractEnd) => {
+    const timelineClip = timelineClips.find(tc => tc.id === timelineClipId);
+    if (!timelineClip) {
+      return null;
+    }
+
+    const clip = clips[timelineClip.clipIndex];
+    if (!clip) {
+      return null;
+    }
+
+    // Account for existing trim points on the timeline clip
+    const currentTrimStart = timelineClip.trimStart ?? 0;
+    const currentTrimEnd = timelineClip.trimEnd ?? clip.duration;
+
+    // Calculate absolute timestamps in the source video
+    const absoluteStart = currentTrimStart + extractStart;
+    const absoluteEnd = currentTrimStart + extractEnd;
+
+    // Clamp to valid range
+    const clampedStart = Math.max(0, Math.min(absoluteStart, clip.duration));
+    const clampedEnd = Math.max(clampedStart, Math.min(absoluteEnd, clip.duration));
+
+    return {
+      sourceClip: clip,
+      trimStart: clampedStart,
+      trimEnd: clampedEnd,
+      duration: clampedEnd - clampedStart
+    };
+  }, [timelineClips, clips]);
+
   const value = {
     // State
     timelineClips,
@@ -317,7 +350,8 @@ export function TimelineProvider({ children, clips }) {
     seekPlayhead,
     getActiveClipAtTime,
     clearTimeline,
-    handleClipDeleted
+    handleClipDeleted,
+    getClipExtractionParams
   };
 
   return (

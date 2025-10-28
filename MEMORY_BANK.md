@@ -101,6 +101,39 @@ ClipForge/
   - Context: `src/TimelineContext.jsx:204-280` (updateTimelineClipTrim, splitTimelineClip)
   - Video enforcement: `src/components/VideoPlayer.jsx:79-193` (trim boundary checks)
 
+### 4.5. Clip Mode - Extract Timeline Sections to Media Library (NEW - October 28, 2025)
+- **Keyboard Shortcut**: Press 'C' key to start/complete clip extraction at playhead position
+- **Button**: Click "📋 Clip Mode (press C)" button in timeline controls
+- **Workflow**:
+  1. Press 'C' (or click button) to start selection at current playhead
+  2. Move playhead to end of desired section (drag or click)
+  3. Press 'C' again (or click button) to extract and add to library
+- **Visual Indicators**:
+  - Green pulsing overlay shows selection region during selection
+  - Duration label displays "Extract: X seconds"
+  - Button shows "📋 Extracting... (press C)" when active
+- **Automatic Processing**:
+  - Extracts selected section using FFmpeg
+  - Saves to same directory as source clip with timestamped filename
+  - Automatically imports extracted clip to media library
+  - No save dialog interruption - seamless workflow
+- **Implementation**:
+  - Unified handler: `handleClipModeAction()` for both keyboard and button
+  - Extraction: `handleExtractClip()` calls FFmpeg with trim points
+  - Context helper: `getClipExtractionParams()` calculates absolute timestamps
+  - Accounts for existing trim points on timeline clips
+- **Styling**:
+  - Green theme (distinct from red trim overlay)
+  - CSS classes: `.clip-selection-region`, `.clip-selection-label`
+  - Pulsing animation for visual feedback
+- **Location**:
+  - Button handler: `src/App.jsx:292-367` (handleClipModeAction)
+  - Extraction logic: `src/App.jsx:370-344` (handleExtractClip)
+  - Context helper: `src/TimelineContext.jsx:305-336` (getClipExtractionParams)
+  - Keyboard handler: `src/App.jsx:432-437` (delegates to handleClipModeAction)
+  - UI overlay: `src/components/Timeline.jsx:254-267`
+  - CSS styling: `src/components/Timeline.css:463-501`
+
 ### 5. Video Export (FFmpeg Integration)
 - **Backend**: Rust command spawns FFmpeg CLI process
 - **Export Settings**:
@@ -387,6 +420,8 @@ const [currentTime, setCurrentTime] = useState(0);  // Video playback time
 const [isExporting, setIsExporting] = useState(false);  // Export in progress
 const [isTrimMode, setIsTrimMode] = useState(false);  // Trim mode active
 const [trimStartTime, setTrimStartTime] = useState(null);  // Trim selection start
+const [isClipMode, setIsClipMode] = useState(false);  // Clip mode active (NEW)
+const [clipStartTime, setClipStartTime] = useState(null);  // Clip selection start (NEW)
 ```
 
 ### TimelineContext State
@@ -560,19 +595,22 @@ npm run tauri:build
 1. **handleImportVideo**: `src/App.jsx:35-56` - Import video file via dialog
 2. **handleVideoLoaded**: `src/App.jsx:88-117` - Update clip metadata from video element
 3. **Keyboard Handler ('T' key)**: `src/App.jsx:196-325` - Trim mode toggle and trim application
-4. **handleTimelineTimeUpdate**: `src/App.jsx:119-156` - Sync video player with timeline playhead
-5. **handleExportVideo**: `src/App.jsx:327-401` - Export video with FFmpeg (uses timeline trim points)
-6. **updateTimelineClipTrim**: `src/TimelineContext.jsx:204-223` - Update trim points for timeline instance
-7. **splitTimelineClip**: `src/TimelineContext.jsx:225-280` - Split clip by removing middle section
-8. **getActiveClipAtTime**: `src/TimelineContext.jsx:161-202` - Find clip at playhead position
-9. **export_video** (Rust): `src-tauri/src/lib.rs:47-91` - FFmpeg command execution
-10. **list_audio_devices** (Rust): `src-tauri/src/lib.rs:259-316` - Enumerate AVFoundation audio devices
-11. **start_recording** (Rust): `src-tauri/src/lib.rs:237-340` - Start screen recording with audio
-12. **stop_recording** (Rust): `src-tauri/src/lib.rs:342-380` - Stop recording with SIGINT (handles exit code 255)
-13. **handleStartRecording**: `src/components/RecordingControls.jsx:47-85` - Frontend recording start with audio settings
-14. **handleStopRecording**: `src/components/RecordingControls.jsx:88-109` - Frontend recording stop
-15. **AudioSettingsModal**: `src/components/AudioSettingsModal.jsx` - Audio device selection and configuration
-16. **loadAudioDevices**: `src/components/AudioSettingsModal.jsx:23-41` - Load and filter audio devices
+4. **handleClipModeAction**: `src/App.jsx:292-367` - Clip mode toggle and extraction (NEW - Oct 28, 2025)
+5. **handleExtractClip**: `src/App.jsx:370-344` - Extract timeline section to media library (NEW - Oct 28, 2025)
+6. **handleTimelineTimeUpdate**: `src/App.jsx:119-156` - Sync video player with timeline playhead
+7. **handleExportVideo**: `src/App.jsx:327-401` - Export video with FFmpeg (uses timeline trim points)
+8. **updateTimelineClipTrim**: `src/TimelineContext.jsx:204-223` - Update trim points for timeline instance
+9. **splitTimelineClip**: `src/TimelineContext.jsx:225-280` - Split clip by removing middle section
+10. **getClipExtractionParams**: `src/TimelineContext.jsx:305-336` - Calculate extraction timestamps (NEW - Oct 28, 2025)
+11. **getActiveClipAtTime**: `src/TimelineContext.jsx:161-202` - Find clip at playhead position
+12. **export_video** (Rust): `src-tauri/src/lib.rs:47-91` - FFmpeg command execution
+13. **list_audio_devices** (Rust): `src-tauri/src/lib.rs:259-316` - Enumerate AVFoundation audio devices
+14. **start_recording** (Rust): `src-tauri/src/lib.rs:237-340` - Start screen recording with audio
+15. **stop_recording** (Rust): `src-tauri/src/lib.rs:342-380` - Stop recording with SIGINT (handles exit code 255)
+16. **handleStartRecording**: `src/components/RecordingControls.jsx:47-85` - Frontend recording start with audio settings
+17. **handleStopRecording**: `src/components/RecordingControls.jsx:88-109` - Frontend recording stop
+18. **AudioSettingsModal**: `src/components/AudioSettingsModal.jsx` - Audio device selection and configuration
+19. **loadAudioDevices**: `src/components/AudioSettingsModal.jsx:23-41` - Load and filter audio devices
 
 ### State Update Patterns
 - Always use `useCallback` for handlers passed to child components

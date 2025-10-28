@@ -105,7 +105,9 @@ function Timeline({
   selectedTimelineClipId,
   onTimelineClipSelect,
   isTrimMode = false,
-  trimStartTime = null
+  trimStartTime = null,
+  isClipMode = false,
+  clipStartTime = null
 }) {
   const { timelineClips, playheadTime, totalDuration } = useTimeline();
 
@@ -137,6 +139,8 @@ function Timeline({
         onTimelineClipSelect={onTimelineClipSelect}
         isTrimMode={isTrimMode}
         trimStartTime={trimStartTime}
+        isClipMode={isClipMode}
+        clipStartTime={clipStartTime}
       />
     </div>
   );
@@ -154,7 +158,9 @@ function TimelineTrackDroppable({
   selectedTimelineClipId,
   onTimelineClipSelect,
   isTrimMode,
-  trimStartTime
+  trimStartTime,
+  isClipMode,
+  clipStartTime
 }) {
   const { setNodeRef, isOver } = useDroppable({
     id: 'timeline-track'
@@ -241,6 +247,21 @@ function TimelineTrackDroppable({
               >
                 <div className="trim-selection-label">
                   Remove: {formatTime(Math.abs(playheadTime - trimStartTime))}
+                </div>
+              </div>
+            )}
+
+            {/* Clip Selection Overlay - shown when clip mode is active */}
+            {isClipMode && clipStartTime !== null && (
+              <div
+                className="clip-selection-region"
+                style={{
+                  left: `${getPixelWidth(Math.min(clipStartTime, playheadTime))}px`,
+                  width: `${getPixelWidth(Math.abs(playheadTime - clipStartTime))}px`
+                }}
+              >
+                <div className="clip-selection-label">
+                  Extract: {formatTime(Math.abs(playheadTime - clipStartTime))}
                 </div>
               </div>
             )}
