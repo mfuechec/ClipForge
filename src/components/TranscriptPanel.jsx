@@ -5,6 +5,16 @@ function formatTimestamp(seconds) {
   return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
+// Generate color for segment index using HSL
+function getSegmentColor(index, total) {
+  // Use distinct hues across the color wheel, avoiding red (playhead color)
+  // Start at 180° (cyan) and distribute across 280° to avoid red (0°) region
+  const hue = (180 + (index * 280 / Math.max(total, 1))) % 360;
+  const saturation = 70;
+  const lightness = 60;
+  return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+}
+
 function TranscriptPanel({
   segments = [],
   currentTime = 0,
@@ -13,12 +23,16 @@ function TranscriptPanel({
   onToggleCollapse,
   onTranscribe,
   isTranscribing = false,
-  hasVideo = false
+  hasVideo = false,
+  selectedSegmentIndex = null,
+  onSegmentSelect
 }) {
-  // Find the active segment based on current time
+  // Find the active segment based on current time (playing position)
   const getActiveSegmentIndex = () => {
     for (let i = segments.length - 1; i >= 0; i--) {
-      if (currentTime >= segments[i].time) {
+      const segment = segments[i];
+      // Check if current time is within segment range [start, end)
+      if (currentTime >= segment.start && currentTime < segment.end) {
         return i;
       }
     }
@@ -26,6 +40,17 @@ function TranscriptPanel({
   };
 
   const activeIndex = getActiveSegmentIndex();
+
+  const handleSegmentClick = (segment, index) => {
+    // Seek to segment start
+    if (onSeek) {
+      onSeek(segment.start);
+    }
+    // Update selected segment
+    if (onSegmentSelect) {
+      onSegmentSelect(index);
+    }
+  };
 
   return (
     <div className={`transcript-panel ${collapsed ? 'collapsed' : ''}`}>
@@ -66,16 +91,26 @@ function TranscriptPanel({
                 </div>
               </div>
             ) : (
-              segments.map((segment, index) => (
-                <div
-                  key={index}
-                  className={`transcript-segment ${index === activeIndex ? 'active' : ''}`}
-                  onClick={() => onSeek && onSeek(segment.time)}
-                >
-                  <span className="timestamp">{formatTimestamp(segment.time)}</span>
-                  <p>{segment.text}</p>
-                </div>
-              ))
+              segments.map((segment, index) => {
+                const segmentColor = getSegmentColor(index, segments.length);
+                const isActive = index === activeIndex;
+                const isSelected = index === selectedSegmentIndex;
+
+                return (
+                  <div
+                    key={index}
+                    className={`transcript-segment ${isActive ? 'active' : ''} ${isSelected ? 'selected' : ''} ${segment.isFiller ? 'filler' : ''}`}
+                    onClick={() => handleSegmentClick(segment, index)}
+                    style={{
+                      borderLeftColor: segmentColor,
+                      '--segment-color': segmentColor
+                    }}
+                  >
+                    <span className="timestamp">{formatTimestamp(segment.start)}</span>
+                    <p>{segment.text}</p>
+                  </div>
+                );
+              })
             )}
           </div>
         </>
@@ -95,3 +130,4 @@ function TranscriptPanel({
 }
 
 export default TranscriptPanel;
+export { getSegmentColor };

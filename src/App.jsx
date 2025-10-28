@@ -43,6 +43,7 @@ function AppContent({ clips, setClips }) {
   // Transcript data - per clip transcripts stored by video path
   const [transcriptsByPath, setTranscriptsByPath] = useState({});
   const [isTranscribing, setIsTranscribing] = useState(false);
+  const [selectedSegmentIndex, setSelectedSegmentIndex] = useState(null);
 
   // Get API key from environment variable
   const openaiKey = import.meta.env.VITE_OPENAI_API_KEY || '';
@@ -57,7 +58,10 @@ function AppContent({ clips, setClips }) {
   const playingTrimEnd = currentTimelineClipInfo ? currentTimelineClipInfo.timelineClip.trimEnd : null;
 
   // Get transcript for currently playing clip
-  const transcriptSegments = playingClip ? (transcriptsByPath[playingClip.path] || []) : [];
+  // Filter out segments that start beyond the clip duration (Whisper sometimes generates extra segments)
+  const transcriptSegments = playingClip
+    ? (transcriptsByPath[playingClip.path] || []).filter(seg => seg.start < (playingClip.duration || Infinity))
+    : [];
 
   // Configure drag sensors
   const sensors = useSensors(
@@ -112,9 +116,10 @@ function AppContent({ clips, setClips }) {
 
       console.log('[App] Transcription result:', result);
 
-      // Convert segments to match our format (start instead of time)
+      // Convert segments to match our format, preserving both start and end
       const segments = result.segments.map(seg => ({
-        time: seg.start,
+        start: seg.start,
+        end: seg.end,
         text: seg.text,
         isFiller: seg.is_filler,
         confidence: seg.confidence
@@ -782,12 +787,13 @@ function AppContent({ clips, setClips }) {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Calculate grid columns based on collapsed states
+  // Calculate grid columns and rows based on collapsed states
   const gridColumns = `${mediaLibraryCollapsed ? '0' : '200px'} 1fr ${transcriptCollapsed ? '0' : '250px'}`;
+  const gridRows = `60px 1fr ${transcriptCollapsed ? '280px' : '200px'}`; // Shorter timeline when transcript is open
 
   return (
     <DndContext sensors={sensors} onDragStart={handleDragStart} onDragMove={handleDragMove} onDragEnd={handleDragEnd}>
-    <div className="App" style={{ gridTemplateColumns: gridColumns }}>
+    <div className="App" style={{ gridTemplateColumns: gridColumns, gridTemplateRows: gridRows }}>
       {/* Header - Spans Full Width */}
       <header className="app-header">
         <h1>🎬 ClipForge</h1>
@@ -840,6 +846,8 @@ function AppContent({ clips, setClips }) {
         onTranscribe={handleTranscribeVideo}
         isTranscribing={isTranscribing}
         hasVideo={!!playingClip}
+        selectedSegmentIndex={selectedSegmentIndex}
+        onSegmentSelect={setSelectedSegmentIndex}
       />
 
       {/* Timeline Section - Bottom Spanning All */}
@@ -882,6 +890,11 @@ function AppContent({ clips, setClips }) {
           trimStartTime={trimStartTime}
           isClipMode={isClipMode}
           clipStartTime={clipStartTime}
+          transcriptSegments={transcriptSegments}
+          transcriptClipPath={playingClip?.path}
+          transcriptCollapsed={transcriptCollapsed}
+          selectedSegmentIndex={selectedSegmentIndex}
+          onSegmentSelect={setSelectedSegmentIndex}
         />
       </div>
 

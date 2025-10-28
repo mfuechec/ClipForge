@@ -2,6 +2,7 @@ import { useRef } from 'react';
 import './Timeline.css';
 import { useDraggable, useDroppable } from '@dnd-kit/core';
 import { useTimeline } from '../TimelineContext';
+import { getSegmentColor } from './TranscriptPanel';
 
 // Draggable Timeline Clip Block
 function DraggableTimelineClip({
@@ -107,7 +108,12 @@ function Timeline({
   isTrimMode = false,
   trimStartTime = null,
   isClipMode = false,
-  clipStartTime = null
+  clipStartTime = null,
+  transcriptSegments = [],
+  transcriptClipPath = null,
+  transcriptCollapsed = true,
+  selectedSegmentIndex = null,
+  onSegmentSelect
 }) {
   const { timelineClips, playheadTime, totalDuration } = useTimeline();
 
@@ -141,6 +147,11 @@ function Timeline({
         trimStartTime={trimStartTime}
         isClipMode={isClipMode}
         clipStartTime={clipStartTime}
+        transcriptSegments={transcriptSegments}
+        transcriptClipPath={transcriptClipPath}
+        transcriptCollapsed={transcriptCollapsed}
+        selectedSegmentIndex={selectedSegmentIndex}
+        onSegmentSelect={onSegmentSelect}
       />
     </div>
   );
@@ -160,7 +171,12 @@ function TimelineTrackDroppable({
   isTrimMode,
   trimStartTime,
   isClipMode,
-  clipStartTime
+  clipStartTime,
+  transcriptSegments,
+  transcriptClipPath,
+  transcriptCollapsed,
+  selectedSegmentIndex,
+  onSegmentSelect
 }) {
   const { setNodeRef, isOver } = useDroppable({
     id: 'timeline-track'
@@ -208,6 +224,54 @@ function TimelineTrackDroppable({
             className="timeline-track"
             style={{ width: `${Math.max(800, getPixelWidth(totalDuration))}px` }}
           >
+            {/* Transcript Segment Overlays - Only show when transcript panel is open */}
+            {!transcriptCollapsed && transcriptSegments.length > 0 && timelineClips.length > 0 && transcriptClipPath && (
+              <div className="transcript-segments-overlay">
+                {timelineClips.map((timelineClip) => {
+                  const clip = clips[timelineClip.clipIndex];
+                  if (!clip) return null;
+
+                  // Only show segments for clips that match the transcript source
+                  if (clip.path !== transcriptClipPath) return null;
+
+                  const trimStart = timelineClip.trimStart ?? 0;
+                  const trimEnd = timelineClip.trimEnd ?? clip.duration;
+
+                  return transcriptSegments.map((segment, index) => {
+                    // Only show segments that fall within this clip's trim range
+                    if (segment.start >= trimEnd || segment.end <= trimStart) {
+                      return null;
+                    }
+
+                    // Calculate segment position relative to timeline
+                    const segmentStartInClip = Math.max(segment.start, trimStart);
+                    const segmentEndInClip = Math.min(segment.end, trimEnd);
+                    const segmentStartOnTimeline = timelineClip.startTime + (segmentStartInClip - trimStart);
+                    const segmentEndOnTimeline = timelineClip.startTime + (segmentEndInClip - trimStart);
+
+                    const segmentColor = getSegmentColor(index, transcriptSegments.length);
+                    const isSelected = index === selectedSegmentIndex;
+
+                    return (
+                      <div
+                        key={`${timelineClip.id}-${index}`}
+                        className={`timeline-transcript-segment ${isSelected ? 'selected' : ''}`}
+                        style={{
+                          left: `${getPixelWidth(segmentStartOnTimeline)}px`,
+                          width: `${getPixelWidth(segmentEndOnTimeline - segmentStartOnTimeline)}px`,
+                          backgroundColor: segmentColor,
+                          opacity: isSelected ? 0.6 : 0.3,
+                          borderColor: segmentColor
+                        }}
+                        onClick={() => onSegmentSelect && onSegmentSelect(index)}
+                        title={`${segment.text.substring(0, 50)}...`}
+                      />
+                    );
+                  });
+                })}
+              </div>
+            )}
+
             {/* Playhead */}
             {totalDuration > 0 && (
               <DraggablePlayhead
