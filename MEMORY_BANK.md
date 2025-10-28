@@ -117,8 +117,8 @@ ClipForge/
 ### 6. Screen Recording with Audio (FULLY IMPLEMENTED)
 - **Recording Modes**:
   - Screen: Capture screen with cursor using AVFoundation
-  - Webcam: Record from camera with audio
-  - Screen + Webcam: Combo recording (PiP style - planned)
+  - Webcam: Record from camera with audio ✅
+  - Screen + Webcam: Picture-in-picture combo recording ✅
 - **Audio System**:
   - **Microphone Recording**: Built-in or external mic via AVFoundation
   - **System Audio Recording**: Virtual audio driver (BlackHole 2ch)
@@ -698,6 +698,76 @@ ffmpeg -devices
 brew reinstall ffmpeg
 ```
 
+### ⚠️ Problem 10: Webcam Mode - No Audio Recorded (RESOLVED)
+- **Status**: ✅ RESOLVED - Added explicit stream mapping
+- **Date**: October 28, 2025
+- **Symptoms**: Webcam mode recorded video but no audio track
+- **Root Cause**: FFmpeg wasn't explicitly mapping audio stream from webcam input
+- **Fix**: Added explicit `-map` arguments for both video and audio streams
+  ```rust
+  // Before: Implicit stream selection
+  cmd.arg("-i").arg(&format!("0:{}", mic_device));
+
+  // After: Explicit stream mapping
+  cmd.arg("-i").arg(&format!("0:{}", mic_device))
+      .arg("-map").arg("0:v")  // Video from webcam
+      .arg("-map").arg("0:a"); // Audio from microphone
+  ```
+- **Location**: `src-tauri/src/lib.rs:522-538`
+
+### ⚠️ Problem 11: Combo Mode - Webcam Not Shown (RESOLVED)
+- **Status**: ✅ RESOLVED - Implemented picture-in-picture overlay
+- **Date**: October 28, 2025
+- **Symptoms**: Combo mode only showed screen, no webcam video visible
+- **Root Cause**: Combo mode only captured screen video, didn't capture webcam at all
+- **Fix**: Complete rewrite of combo mode to capture both streams and overlay them
+  1. **Multiple Input Capture**:
+     - Input 0: Screen video (1920x1080)
+     - Input 1: Webcam video (320x180)
+     - Input 2: Microphone audio (optional)
+     - Input 3: System audio (optional)
+  2. **Picture-in-Picture Filter**:
+     ```
+     [0:v]fps=30,setpts=PTS-STARTPTS,scale=1920:1080[screen];
+     [1:v]fps=30,setpts=PTS-STARTPTS,scale=320:180[webcam];
+     [screen][webcam]overlay=W-w-20:H-h-20:shortest=1[vout]
+     ```
+  3. **Webcam Position**: Bottom-right corner with 20px margin
+- **Location**: `src-tauri/src/lib.rs:540-598`
+
+### ⚠️ Problem 12: Combo Mode - Choppy Webcam PIP (RESOLVED)
+- **Status**: ✅ RESOLVED - Added buffering and frame sync
+- **Date**: October 28, 2025
+- **Symptoms**: Webcam overlay was very choppy and stuttering
+- **Root Cause**: Screen and webcam streams weren't synchronized, causing frame drops
+- **Fix**: Multiple synchronization improvements
+  1. **Thread Queue Buffering**: Added `-thread_queue_size 512` to all inputs
+  2. **Frame Rate Sync**: Added `fps=30` filter to both video streams
+  3. **Timestamp Reset**: Added `setpts=PTS-STARTPTS` to reset timestamps to 0
+  4. **Shortest Stream**: Added `shortest=1` to handle stream length differences
+- **Location**: `src-tauri/src/lib.rs:545-556, 707-709`
+
+### ⚠️ Problem 13: Combo Mode - Audio Compressed into First Second (RESOLVED)
+- **Status**: ✅ RESOLVED - Fixed audio timestamp synchronization
+- **Date**: October 28, 2025
+- **Symptoms**: All audio compressed into first ~1 second, rest of video silent
+- **Root Cause**: Audio timestamps not reset while video timestamps were, causing FFmpeg to squeeze audio timeline
+  - Video: 0s → 10s (reset via setpts)
+  - Audio: 5000s → 5010s (original timestamps)
+  - FFmpeg compressed 10s of audio into 1s to "fit"
+- **Fix**: Reset audio timestamps with `asetpts=PTS-STARTPTS` to match video
+  ```rust
+  // Single audio source
+  [2:a]asetpts=PTS-STARTPTS[aout]
+
+  // Dual audio sources (mic + system)
+  [2:a]asetpts=PTS-STARTPTS[a1];
+  [3:a]asetpts=PTS-STARTPTS[a2];
+  [a1][a2]amix=inputs=2:duration=first[aout]
+  ```
+- **Additional Fix**: Switched from `amerge` to `amix` for proper audio mixing
+- **Location**: `src-tauri/src/lib.rs:711-728`
+
 ## Contact & Resources
 - **Project Location**: `/Users/mfuechec/Desktop/Gauntlet Projects/ClipForge`
 - **Tauri Docs**: https://tauri.app/
@@ -711,6 +781,7 @@ brew reinstall ffmpeg
 **Recording Feature Added**: October 27, 2025
 **Audio System Implemented**: October 27, 2025
 **Video Player Fixed**: October 27, 2025
+**Combo Mode Completed**: October 28, 2025
 
 **MVP Status**: ✅ All core features fully implemented and tested
 **Build Status**: ✅ Production app packaged and ready for distribution
@@ -734,4 +805,4 @@ brew reinstall ffmpeg
 3. Implement multi-clip concatenation
 4. Add keyboard shortcuts and progress indicators
 5. Audio waveform visualization
-6. Picture-in-picture combo recording
+6. ✅ Picture-in-picture combo recording - COMPLETED Oct 28, 2025

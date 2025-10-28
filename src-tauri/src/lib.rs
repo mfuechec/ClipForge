@@ -520,29 +520,82 @@ fn start_recording(options: StartRecordingOptions, state: State<RecordingState>)
                 }
             },
             "webcam" => {
-                // For webcam, use the selected mic device or default
-                let audio_input = if mic_enabled {
-                    format!("0:{}", mic_device)
-                } else {
-                    "0:none".to_string()
-                };
+                // For webcam, capture video device 0 with audio
+                if mic_enabled {
+                    // Capture webcam with microphone audio
+                    cmd.arg("-f").arg("avfoundation")
+                        .arg("-framerate").arg("30")
+                        .arg("-i").arg(&format!("0:{}", mic_device));
 
-                cmd.arg("-f").arg("avfoundation")
-                    .arg("-framerate").arg("30")
-                    .arg("-i").arg(&audio_input);
+                    // Explicitly map video and audio streams
+                    cmd.arg("-map").arg("0:v")  // Video from webcam
+                        .arg("-map").arg("0:a"); // Audio from microphone
+                } else {
+                    // Capture webcam without audio
+                    cmd.arg("-f").arg("avfoundation")
+                        .arg("-framerate").arg("30")
+                        .arg("-i").arg("0:none");
+                }
             },
             "combo" => {
-                // For combo, use screen with audio
-                let audio_input = if mic_enabled {
-                    format!("1:{}", mic_device)
-                } else {
-                    "1:none".to_string()
-                };
+                // For combo mode: capture screen + webcam, then overlay webcam on screen
 
-                cmd.arg("-f").arg("avfoundation")
+                // Input 0: Screen video (no audio attached to avoid conflicts)
+                // Add thread_queue_size for better buffering and sync
+                cmd.arg("-thread_queue_size").arg("512")
+                    .arg("-f").arg("avfoundation")
                     .arg("-capture_cursor").arg("1")
                     .arg("-framerate").arg("30")
-                    .arg("-i").arg(&audio_input);
+                    .arg("-i").arg("1:none");
+
+                // Input 1: Webcam video (no audio, we'll handle audio separately)
+                // Add thread_queue_size for smooth capture
+                cmd.arg("-thread_queue_size").arg("512")
+                    .arg("-f").arg("avfoundation")
+                    .arg("-framerate").arg("30")
+                    .arg("-i").arg("0:none");
+
+                // Handle audio inputs separately (similar to screen mode dual audio)
+                if mic_enabled && sys_audio_enabled {
+                    let sys_audio_device = audio_settings
+                        .and_then(|s| {
+                            if s.system_audio_device == "none" || s.system_audio_device.is_empty() {
+                                None
+                            } else {
+                                Some(s.system_audio_device.as_str())
+                            }
+                        })
+                        .unwrap_or("1");
+
+                    // Input 2: Microphone audio
+                    cmd.arg("-thread_queue_size").arg("512")
+                        .arg("-f").arg("avfoundation")
+                        .arg("-i").arg(&format!(":{}", mic_device));
+
+                    // Input 3: System audio
+                    cmd.arg("-thread_queue_size").arg("512")
+                        .arg("-f").arg("avfoundation")
+                        .arg("-i").arg(&format!(":{}", sys_audio_device));
+                } else if mic_enabled {
+                    // Input 2: Just microphone
+                    cmd.arg("-thread_queue_size").arg("512")
+                        .arg("-f").arg("avfoundation")
+                        .arg("-i").arg(&format!(":{}", mic_device));
+                } else if sys_audio_enabled {
+                    // Input 2: Just system audio
+                    let sys_audio_device = audio_settings
+                        .and_then(|s| {
+                            if s.system_audio_device == "none" || s.system_audio_device.is_empty() {
+                                None
+                            } else {
+                                Some(s.system_audio_device.as_str())
+                            }
+                        })
+                        .unwrap_or("1");
+                    cmd.arg("-thread_queue_size").arg("512")
+                        .arg("-f").arg("avfoundation")
+                        .arg("-i").arg(&format!(":{}", sys_audio_device));
+                }
             },
             _ => return Err("Invalid recording mode".to_string()),
         }
@@ -583,9 +636,22 @@ fn start_recording(options: StartRecordingOptions, state: State<RecordingState>)
     }
 
     // Output settings: H.264/MP4 optimized for smooth browser playback
-    // Scale down to 1080p max for smooth playback, ensure even dimensions for H.264
-    cmd.arg("-vf").arg("scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2")
-        .arg("-c:v").arg("libx264")
+
+    // Video filtering depends on mode:
+    // - For screen/webcam: simple scale filter
+    // - For combo: overlay webcam on screen (picture-in-picture)
+    #[cfg(target_os = "macos")]
+    let is_combo_mode = options.mode == "combo";
+
+    #[cfg(not(target_os = "macos"))]
+    let is_combo_mode = false;
+
+    if !is_combo_mode {
+        // Simple scale for screen and webcam modes
+        cmd.arg("-vf").arg("scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2");
+    }
+
+    cmd.arg("-c:v").arg("libx264")
         .arg("-preset").arg("veryfast") // Balanced encoding: fast recording + smooth playback
         .arg("-tune").arg("fastdecode") // Optimize for decode performance
         .arg("-profile:v").arg("main") // Main profile for better hardware decode support
@@ -629,12 +695,39 @@ fn start_recording(options: StartRecordingOptions, state: State<RecordingState>)
             _ => "128k",
         };
 
-        // Check if we're mixing dual audio (mic + system)
-        // This happens when we have 3 inputs: video (0), mic (1), system (2)
-        // ONLY add filter if BOTH are enabled and we actually created 3 inputs
+        // Check if we're mixing dual audio (mic + system) or doing video overlay (combo mode)
         #[cfg(target_os = "macos")]
-        if options.mode == "screen" && mic_enabled && sys_audio_enabled {
-            // Dual audio mixing: merge mic (input 1) + system (input 2)
+        if options.mode == "combo" {
+            // Combo mode: overlay webcam on screen + handle audio
+            // Inputs: 0=screen video, 1=webcam video, 2=mic audio (optional), 3=system audio (optional)
+
+            // Create picture-in-picture effect: webcam in bottom-right corner
+            // Use fps filter and setpts to ensure smooth, synchronized playback
+            // Scale screen to 1920x1080, scale webcam to 320x180, overlay at bottom-right with 20px margin
+            let video_filter = "[0:v]fps=30,setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2[screen];\
+                               [1:v]fps=30,setpts=PTS-STARTPTS,scale=320:180:force_original_aspect_ratio=decrease:force_divisible_by=2[webcam];\
+                               [screen][webcam]overlay=W-w-20:H-h-20:shortest=1[vout]";
+
+            if mic_enabled && sys_audio_enabled {
+                // Both audio sources: mix them with timestamp sync
+                // Reset audio timestamps to match video, then mix the streams
+                let filter = format!("{};[2:a]asetpts=PTS-STARTPTS[a1];[3:a]asetpts=PTS-STARTPTS[a2];[a1][a2]amix=inputs=2:duration=first[aout]", video_filter);
+                cmd.arg("-filter_complex").arg(&filter)
+                    .arg("-map").arg("[vout]")    // Overlayed video
+                    .arg("-map").arg("[aout]");   // Mixed audio
+            } else if mic_enabled || sys_audio_enabled {
+                // Single audio source - reset timestamps to sync with video
+                let filter = format!("{};[2:a]asetpts=PTS-STARTPTS[aout]", video_filter);
+                cmd.arg("-filter_complex").arg(&filter)
+                    .arg("-map").arg("[vout]")    // Overlayed video
+                    .arg("-map").arg("[aout]");   // Synced audio
+            } else {
+                // No audio
+                cmd.arg("-filter_complex").arg(video_filter)
+                    .arg("-map").arg("[vout]");   // Overlayed video only
+            }
+        } else if options.mode == "screen" && mic_enabled && sys_audio_enabled {
+            // Screen mode with dual audio mixing: merge mic (input 1) + system (input 2)
             // Use amerge filter to combine both audio streams
             cmd.arg("-filter_complex")
                 .arg("[1:a][2:a]amerge=inputs=2[aout]")
