@@ -1,4 +1,6 @@
+import { useState, useEffect } from 'react';
 import { useDraggable, useDroppable } from '@dnd-kit/core';
+import { convertFileSrc } from '@tauri-apps/api/core';
 
 function formatDuration(seconds) {
   if (!seconds || isNaN(seconds)) return '0:00';
@@ -8,47 +10,99 @@ function formatDuration(seconds) {
 }
 
 // Individual draggable media item
-function DraggableMediaItem({ clip, index, isSelected, onSelect, onDelete }) {
+function DraggableMediaItem({ clip, index, isSelected, onSelect, renamingClipIndex, onRename }) {
+  const [renameValue, setRenameValue] = useState('');
+  const isRenaming = renamingClipIndex === index;
+
+  // Initialize rename value when entering rename mode
+  useEffect(() => {
+    if (isRenaming) {
+      console.log('[MediaLibrary] Entering rename mode for clip:', index);
+      setRenameValue(clip.filename);
+    } else {
+      setRenameValue('');
+    }
+  }, [isRenaming, clip.filename, index]);
+
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `media-clip-${index}`,
-    data: { type: 'media-clip', clipIndex: index }
+    data: { type: 'media-clip', clipIndex: index },
+    disabled: isRenaming // Disable dragging when renaming
   });
 
   const style = {
     opacity: isDragging ? 0.5 : 1,
-    cursor: isDragging ? 'grabbing' : 'grab'
+    cursor: isRenaming ? 'text' : (isDragging ? 'grabbing' : 'grab')
+  };
+
+  const handleClick = () => {
+    if (isRenaming) return; // Don't select while renaming
+    onSelect(index);
+  };
+
+  const handleRenameSubmit = (e) => {
+    e.preventDefault();
+    if (onRename) {
+      onRename(index, renameValue.trim());
+    }
+  };
+
+  const handleRenameKeyDown = (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (onRename) {
+        onRename(null, ''); // Cancel rename
+      }
+    }
   };
 
   return (
     <div
       ref={setNodeRef}
       style={style}
-      className={`media-item ${isSelected ? 'selected' : ''}`}
-      onClick={() => onSelect(index)}
-      {...listeners}
-      {...attributes}
+      className={`media-item ${isSelected ? 'selected' : ''} ${isRenaming ? 'renaming' : ''}`}
+      onClick={handleClick}
+      {...(!isRenaming ? listeners : {})}
+      {...(!isRenaming ? attributes : {})}
     >
       <div className="media-thumbnail">
-        🎬
+        {clip.thumbnail_path ? (
+          <img
+            src={convertFileSrc(clip.thumbnail_path)}
+            alt={clip.filename}
+            onError={(e) => {
+              // Fallback to emoji if image fails to load
+              e.target.style.display = 'none';
+              e.target.parentElement.textContent = '🎬';
+            }}
+          />
+        ) : (
+          '🎬'
+        )}
       </div>
       <div className="media-info">
-        <div className="media-name" title={clip.filename}>
-          {clip.filename}
-        </div>
+        {isRenaming ? (
+          <form onSubmit={handleRenameSubmit} style={{ width: '100%' }}>
+            <input
+              type="text"
+              className="media-rename-input"
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              onKeyDown={handleRenameKeyDown}
+              onBlur={handleRenameSubmit}
+              autoFocus
+              onClick={(e) => e.stopPropagation()}
+            />
+          </form>
+        ) : (
+          <div className="media-name" title={clip.filename}>
+            {clip.filename}
+          </div>
+        )}
         <div className="media-duration">
           {formatDuration(clip.duration)}
         </div>
       </div>
-      <button
-        className="media-delete-btn"
-        onClick={(e) => {
-          e.stopPropagation();
-          onDelete(index);
-        }}
-        title="Delete clip"
-      >
-        🗑️
-      </button>
     </div>
   );
 }
@@ -57,9 +111,10 @@ function MediaLibrary({
   clips,
   selectedClipIndex,
   onClipSelect,
-  onDeleteClip,
   collapsed,
-  onToggleCollapse
+  onToggleCollapse,
+  renamingClipIndex,
+  onRename
 }) {
   const { setNodeRef } = useDroppable({
     id: 'media-library'
@@ -98,7 +153,8 @@ function MediaLibrary({
                   index={index}
                   isSelected={selectedClipIndex === index}
                   onSelect={onClipSelect}
-                  onDelete={onDeleteClip}
+                  renamingClipIndex={renamingClipIndex}
+                  onRename={onRename}
                 />
               ))
             )}

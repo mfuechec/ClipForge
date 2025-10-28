@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import './Timeline.css';
 import { useDraggable, useDroppable } from '@dnd-kit/core';
 import { useTimeline } from '../TimelineContext';
@@ -13,8 +13,23 @@ function DraggableTimelineClip({
   onClipSelect,
   isSelected,
   onTimelineClipSelect,
-  isTrimMode
+  isTrimMode,
+  renamingClipId,
+  onRename
 }) {
+  const [renameValue, setRenameValue] = useState('');
+  const isRenaming = renamingClipId === timelineClip.id;
+
+  // Initialize rename value when entering rename mode
+  useEffect(() => {
+    if (isRenaming) {
+      console.log('[Timeline] Entering rename mode for clip:', timelineClip.id);
+      setRenameValue(timelineClip.customName || clip.filename);
+    } else {
+      setRenameValue('');
+    }
+  }, [isRenaming, timelineClip.customName, clip.filename]);
+
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: timelineClip.id,
     data: {
@@ -22,7 +37,7 @@ function DraggableTimelineClip({
       timelineClipId: timelineClip.id,
       clipIndex: timelineClip.clipIndex
     },
-    disabled: isTrimMode // Disable dragging when in trim mode
+    disabled: isTrimMode || isRenaming // Disable dragging when in trim mode or renaming
   });
 
   // Use timeline clip's trim points (not source clip's)
@@ -34,10 +49,11 @@ function DraggableTimelineClip({
     left: `${getPixelWidth(timelineClip.startTime)}px`,
     width: `${getPixelWidth(clipDuration)}px`,
     opacity: isDragging ? 0.5 : 1,
-    cursor: isTrimMode ? 'crosshair' : (isDragging ? 'grabbing' : 'grab')
+    cursor: isTrimMode ? 'crosshair' : (isRenaming ? 'text' : (isDragging ? 'grabbing' : 'grab'))
   };
 
   const handleClick = () => {
+    if (isRenaming) return; // Don't select while renaming
     // Update media library selection to this clip
     if (onClipSelect) {
       onClipSelect(timelineClip.clipIndex);
@@ -48,18 +64,53 @@ function DraggableTimelineClip({
     }
   };
 
+  const handleRenameSubmit = (e) => {
+    e.preventDefault();
+    if (onRename) {
+      onRename(timelineClip.id, renameValue.trim());
+    }
+  };
+
+  const handleRenameKeyDown = (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (onRename) {
+        onRename(null, ''); // Cancel rename
+      }
+    }
+  };
+
+  const displayName = timelineClip.customName || clip.filename;
+
+  console.log('[Timeline] Rendering clip:', timelineClip.id, 'isRenaming:', isRenaming, 'renameValue:', renameValue);
+
   return (
     <div
       ref={setNodeRef}
       key={timelineClip.id}
-      className={`timeline-clip-block ${isSelected ? 'selected' : ''} ${isTrimMode ? 'trim-mode' : ''}`}
+      className={`timeline-clip-block ${isSelected ? 'selected' : ''} ${isTrimMode ? 'trim-mode' : ''} ${isRenaming ? 'renaming' : ''}`}
       style={style}
       onClick={handleClick}
-      {...(!isTrimMode ? listeners : {})}
-      {...(!isTrimMode ? attributes : {})}
+      {...(!isTrimMode && !isRenaming ? listeners : {})}
+      {...(!isTrimMode && !isRenaming ? attributes : {})}
     >
       <div className="clip-block-content">
-        <div className="clip-block-name">{clip.filename}</div>
+        {isRenaming ? (
+          <form onSubmit={handleRenameSubmit} style={{ width: '100%' }}>
+            <input
+              type="text"
+              className="clip-rename-input"
+              value={renameValue}
+              onChange={(e) => setRenameValue(e.target.value)}
+              onKeyDown={handleRenameKeyDown}
+              onBlur={handleRenameSubmit}
+              autoFocus
+              onClick={(e) => e.stopPropagation()}
+            />
+          </form>
+        ) : (
+          <div className="clip-block-name">{displayName}</div>
+        )}
         <div className="clip-block-duration">{formatTime(clipDuration)}</div>
       </div>
     </div>
@@ -113,7 +164,10 @@ function Timeline({
   transcriptClipPath = null,
   transcriptCollapsed = true,
   selectedSegmentIndex = null,
-  onSegmentSelect
+  onSegmentSelect,
+  renamingClipId = null,
+  onStartRename,
+  onCompleteRename
 }) {
   const { timelineClips, playheadTime, totalDuration } = useTimeline();
 
@@ -152,6 +206,8 @@ function Timeline({
         transcriptCollapsed={transcriptCollapsed}
         selectedSegmentIndex={selectedSegmentIndex}
         onSegmentSelect={onSegmentSelect}
+        renamingClipId={renamingClipId}
+        onCompleteRename={onCompleteRename}
       />
     </div>
   );
@@ -176,7 +232,9 @@ function TimelineTrackDroppable({
   transcriptClipPath,
   transcriptCollapsed,
   selectedSegmentIndex,
-  onSegmentSelect
+  onSegmentSelect,
+  renamingClipId,
+  onCompleteRename
 }) {
   const { setNodeRef, isOver } = useDroppable({
     id: 'timeline-track'
@@ -296,6 +354,8 @@ function TimelineTrackDroppable({
                   isSelected={tc.id === selectedTimelineClipId}
                   onTimelineClipSelect={onTimelineClipSelect}
                   isTrimMode={isTrimMode}
+                  renamingClipId={renamingClipId}
+                  onRename={onCompleteRename}
                 />
               );
             })}

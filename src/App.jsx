@@ -19,6 +19,8 @@ function AppContent({ clips, setClips }) {
   const [trimStartTime, setTrimStartTime] = useState(null); // Track where trim selection started
   const [isClipMode, setIsClipMode] = useState(false);
   const [clipStartTime, setClipStartTime] = useState(null); // Track where clip selection started
+  const [renamingClipId, setRenamingClipId] = useState(null); // Track which timeline clip is being renamed
+  const [renamingMediaClipIndex, setRenamingMediaClipIndex] = useState(null); // Track which media clip is being renamed
   const [mediaLibraryCollapsed, setMediaLibraryCollapsed] = useState(true);
   const [transcriptCollapsed, setTranscriptCollapsed] = useState(true);
   const [activeId, setActiveId] = useState(null);
@@ -35,6 +37,7 @@ function AppContent({ clips, setClips }) {
     reorderTimelineClips,
     updateTimelineClipTrim,
     splitTimelineClip,
+    renameTimelineClip,
     seekPlayhead,
     getActiveClipAtTime,
     clearTimeline,
@@ -418,7 +421,33 @@ function AppContent({ clips, setClips }) {
     }
   };
 
-  // Keyboard event handler for Delete/Backspace, 't' for trim, and 'c' for clip
+  // Handler for completing timeline clip rename (submitting or canceling)
+  const handleCompleteRename = (timelineClipId, newName) => {
+    if (timelineClipId && newName) {
+      // Submit rename
+      renameTimelineClip(timelineClipId, newName);
+    }
+    // Exit rename mode
+    setRenamingClipId(null);
+  };
+
+  // Handler for completing media library clip rename (submitting or canceling)
+  const handleRenameMediaClip = (clipIndex, newName) => {
+    if (clipIndex !== null && newName) {
+      // Update the filename in the clips array
+      const updatedClips = clips.map((clip, index) =>
+        index === clipIndex
+          ? { ...clip, filename: newName }
+          : clip
+      );
+      setClips(updatedClips);
+      console.log('[App] Renamed media clip', clipIndex, 'to:', newName);
+    }
+    // Exit rename mode
+    setRenamingMediaClipIndex(null);
+  };
+
+  // Keyboard event handler for Delete/Backspace, 't' for trim, 'c' for clip, and 'r' for rename
   useEffect(() => {
     const handleKeyDown = (e) => {
       // Ignore if typing in an input field
@@ -431,6 +460,25 @@ function AppContent({ clips, setClips }) {
         e.preventDefault();
         handleClipModeAction();
         return;
+      }
+
+      // Handle 'r' key for rename mode
+      if (e.key === 'r' || e.key === 'R') {
+        e.preventDefault();
+
+        // Priority 1: If a timeline clip is selected, rename it
+        if (selectedTimelineClipId) {
+          console.log('[App] Starting rename for timeline clip:', selectedTimelineClipId);
+          setRenamingClipId(selectedTimelineClipId);
+          return;
+        }
+
+        // Priority 2: If a media library clip is selected, rename it
+        if (selectedClipIndex !== null) {
+          console.log('[App] Starting rename for media clip:', selectedClipIndex);
+          setRenamingMediaClipIndex(selectedClipIndex);
+          return;
+        }
       }
 
       // Handle 't' key for trim mode
@@ -575,12 +623,26 @@ function AppContent({ clips, setClips }) {
     try {
       setIsExporting(true);
 
-      // Generate output filename automatically
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-      const outputFilename = `merged_timeline_${timestamp}.mp4`;
+      // Generate output filename based on clip names
+      const firstTimelineClip = timelineClips[0];
+      const lastTimelineClip = timelineClips[timelineClips.length - 1];
+
+      const firstClip = clips[firstTimelineClip.clipIndex];
+      const lastClip = clips[lastTimelineClip.clipIndex];
+
+      // Get clip names (prefer customName, fallback to filename without extension)
+      const getClipName = (timelineClip, clip) => {
+        const name = timelineClip.customName || clip.filename;
+        // Remove file extension
+        return name.replace(/\.[^/.]+$/, '');
+      };
+
+      const firstName = getClipName(firstTimelineClip, firstClip);
+      const lastName = getClipName(lastTimelineClip, lastClip);
+
+      const outputFilename = `Merge: ${firstName}-${lastName}.mp4`;
 
       // Use the same directory as the first clip
-      const firstClip = clips[timelineClips[0].clipIndex];
       const sourceDir = firstClip.path.substring(0, firstClip.path.lastIndexOf('/'));
       const outputPath = `${sourceDir}/${outputFilename}`;
 
@@ -944,9 +1006,10 @@ function AppContent({ clips, setClips }) {
         clips={clips}
         selectedClipIndex={selectedClipIndex}
         onClipSelect={handleClipSelect}
-        onDeleteClip={handleDeleteClip}
         collapsed={mediaLibraryCollapsed}
         onToggleCollapse={() => setMediaLibraryCollapsed(!mediaLibraryCollapsed)}
+        renamingClipIndex={renamingMediaClipIndex}
+        onRename={handleRenameMediaClip}
       />
 
       {/* Main Content Area - Center */}
@@ -1025,6 +1088,8 @@ function AppContent({ clips, setClips }) {
           trimStartTime={trimStartTime}
           isClipMode={isClipMode}
           clipStartTime={clipStartTime}
+          renamingClipId={renamingClipId}
+          onCompleteRename={handleCompleteRename}
           transcriptSegments={transcriptSegments}
           transcriptClipPath={playingClip?.path}
           transcriptCollapsed={transcriptCollapsed}

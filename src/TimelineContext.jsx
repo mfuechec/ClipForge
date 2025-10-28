@@ -89,7 +89,8 @@ export function TimelineProvider({ children, clips }) {
         clipIndex,
         startTime: 0,  // Temporary, will be set by reflow
         trimStart: null,  // No trim initially
-        trimEnd: null     // No trim initially
+        trimEnd: null,    // No trim initially
+        customName: null  // No custom name initially
       };
 
       // Insert at specific index or add to end of timeline
@@ -370,6 +371,19 @@ export function TimelineProvider({ children, clips }) {
     };
   }, [timelineClips, clips]);
 
+  // Rename a timeline clip
+  const renameTimelineClip = useCallback((timelineClipId, customName) => {
+    console.log('[TimelineContext] Renaming timeline clip', timelineClipId, 'to:', customName);
+
+    setTimelineClips(prev =>
+      prev.map(tc =>
+        tc.id === timelineClipId
+          ? { ...tc, customName: customName || null }
+          : tc
+      )
+    );
+  }, []);
+
   const value = {
     // State
     timelineClips,
@@ -382,6 +396,7 @@ export function TimelineProvider({ children, clips }) {
     reorderTimelineClips,
     updateTimelineClipTrim,
     splitTimelineClip,
+    renameTimelineClip,
     seekPlayhead,
     getActiveClipAtTime,
     clearTimeline,

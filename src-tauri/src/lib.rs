@@ -16,6 +16,7 @@ pub struct VideoMetadata {
     duration: Option<f64>,
     width: Option<u32>,
     height: Option<u32>,
+    thumbnail_path: Option<String>,
 }
 
 #[tauri::command]
@@ -50,12 +51,25 @@ fn import_video(path: String) -> Result<VideoMetadata, String> {
         }
     };
 
+    // Generate thumbnail (non-fatal if it fails)
+    let thumbnail_path = match generate_thumbnail(&path, duration) {
+        Ok(thumb_path) => {
+            log::info!("Thumbnail generated: {}", thumb_path);
+            Some(thumb_path)
+        },
+        Err(e) => {
+            log::warn!("Failed to generate thumbnail: {}", e);
+            None
+        }
+    };
+
     let result = VideoMetadata {
         path: path.clone(),
         filename,
         duration: Some(duration),
         width: Some(width),
         height: Some(height),
+        thumbnail_path,
     };
 
     log::info!("Returning metadata: {:?}", result);
@@ -128,6 +142,61 @@ fn probe_video_metadata(path: &str) -> Result<(f64, u32, u32), String> {
     log::info!("Extracted resolution: {}x{}", width, height);
 
     Ok((duration, width, height))
+}
+
+// Helper function to generate thumbnail for a video
+fn generate_thumbnail(video_path: &str, duration: f64) -> Result<String, String> {
+    log::info!("Generating thumbnail for: {}", video_path);
+
+    // Create thumbnails directory in temp folder
+    let temp_dir = std::env::temp_dir();
+    let thumbnails_dir = temp_dir.join("clipforge_thumbnails");
+
+    // Create directory if it doesn't exist
+    std::fs::create_dir_all(&thumbnails_dir)
+        .map_err(|e| format!("Failed to create thumbnails directory: {}", e))?;
+
+    // Generate thumbnail filename based on video path hash
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    video_path.hash(&mut hasher);
+    let hash = hasher.finish();
+    let thumbnail_filename = format!("thumb_{}.jpg", hash);
+    let thumbnail_path = thumbnails_dir.join(thumbnail_filename);
+
+    // Extract frame at 2 seconds or 10% of duration (whichever is smaller)
+    let timestamp = (duration * 0.1).min(2.0);
+
+    log::info!("Extracting frame at {}s to: {:?}", timestamp, thumbnail_path);
+
+    // Use FFmpeg to extract a single frame
+    let output = Command::new("ffmpeg")
+        .args(&[
+            "-ss", &timestamp.to_string(),  // Seek to timestamp
+            "-i", video_path,                // Input video
+            "-vframes", "1",                 // Extract 1 frame
+            "-vf", "scale=320:-1",          // Scale to width 320, maintain aspect ratio
+            "-q:v", "2",                     // High quality JPEG
+            "-y",                            // Overwrite if exists
+            thumbnail_path.to_str().unwrap()
+        ])
+        .output()
+        .map_err(|e| {
+            log::error!("Failed to execute ffmpeg for thumbnail: {}", e);
+            format!("Failed to generate thumbnail: {}", e)
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::error!("FFmpeg thumbnail generation failed: {}", stderr);
+        return Err(format!("Failed to generate thumbnail: {}", stderr));
+    }
+
+    let thumbnail_path_str = thumbnail_path.to_string_lossy().to_string();
+    log::info!("Thumbnail generated successfully: {}", thumbnail_path_str);
+
+    Ok(thumbnail_path_str)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
