@@ -88,9 +88,15 @@ export function TimelineProvider({ children, clips }) {
         id: `timeline-clip-${Date.now()}-${Math.random()}`, // Unique ID for drag-and-drop
         clipIndex,
         startTime: 0,  // Temporary, will be set by reflow
-        trimStart: null,  // No trim initially
-        trimEnd: null,    // No trim initially
-        customName: null  // No custom name initially
+        trimStart: null,  // No trim initially (applies to video, or both when linked)
+        trimEnd: null,    // No trim initially (applies to video, or both when linked)
+        audioTrimStart: null,  // Audio-specific trim start (used when audio is unlinked)
+        audioTrimEnd: null,    // Audio-specific trim end (used when audio is unlinked)
+        customName: null,  // No custom name initially
+        isAudioLinked: true,  // Audio and video are linked by default
+        audioOffset: 0,  // Audio offset in seconds when unlinked
+        isVideoMuted: false,  // Video is not muted by default
+        isAudioMuted: false  // Audio is not muted by default
       };
 
       // Insert at specific index or add to end of timeline
@@ -194,6 +200,75 @@ export function TimelineProvider({ children, clips }) {
     setPlayheadTime(clampedTime);
   }, [totalDuration]);
 
+  // Get audio segments that should be playing for a given video clip
+  // Returns array of {start, end} ranges where audio should be unmuted
+  const getAudioSegmentsForClip = useCallback((videoTimelineClip) => {
+    if (!videoTimelineClip) return null;
+
+    const clip = clips[videoTimelineClip.clipIndex];
+    if (!clip) return null;
+
+    // Start with the video clip's own audio range
+    const audioTrimStart = videoTimelineClip.audioTrimStart ?? videoTimelineClip.trimStart ?? 0;
+    const audioTrimEnd = videoTimelineClip.audioTrimEnd ?? videoTimelineClip.trimEnd ?? clip.duration;
+
+    const segments = [{
+      start: audioTrimStart,
+      end: audioTrimEnd
+    }];
+
+    // Look for audio-only clips (zero-duration video) from the same source
+    // After Shift-T middle trim, the second audio clip is ADJACENT (next in sequence)
+    const currentIndex = timelineClips.findIndex(tc => tc.id === videoTimelineClip.id);
+
+    console.log('[TimelineContext] Looking for audio segments for clip', currentIndex, {
+      clipIndex: videoTimelineClip.clipIndex,
+      totalTimelineClips: timelineClips.length
+    });
+
+    for (let i = 0; i < timelineClips.length; i++) {
+      const tc = timelineClips[i];
+
+      // Skip self
+      if (tc.id === videoTimelineClip.id) continue;
+
+      // Check if it's from the same source clip
+      if (tc.clipIndex !== videoTimelineClip.clipIndex) continue;
+
+      // Check if it's an audio-only clip (zero video duration)
+      const tcDuration = (tc.trimEnd ?? clip.duration) - (tc.trimStart ?? 0);
+      console.log('[TimelineContext] Checking clip', i, {
+        id: tc.id,
+        duration: tcDuration,
+        audioTrimStart: tc.audioTrimStart,
+        audioTrimEnd: tc.audioTrimEnd,
+        isAdjacent: i === currentIndex + 1
+      });
+
+      if (tcDuration > 0) continue; // Has video, not audio-only
+
+      // If this is an adjacent audio-only clip from the same source, it's part of a middle trim
+      // Add its audio segment (these are in source video time, not timeline time)
+      if (i === currentIndex + 1) {
+        const audioTrimStart = tc.audioTrimStart ?? 0;
+        const audioTrimEnd = tc.audioTrimEnd ?? clip.duration;
+
+        console.log('[TimelineContext] Found adjacent audio-only clip! Adding segment:', {
+          start: audioTrimStart,
+          end: audioTrimEnd
+        });
+
+        segments.push({
+          start: audioTrimStart,
+          end: audioTrimEnd
+        });
+      }
+    }
+
+    console.log('[TimelineContext] Final audio segments:', segments);
+    return segments;
+  }, [timelineClips, clips]);
+
   // Get the active clip at a given time
   const getActiveClipAtTime = useCallback((time) => {
     // Find the clip that contains this time
@@ -209,6 +284,11 @@ export function TimelineProvider({ children, clips }) {
       const duration = (timelineClip.trimEnd != null && timelineClip.trimStart != null)
         ? timelineClip.trimEnd - timelineClip.trimStart
         : clip.duration;
+
+      // Skip clips with zero video duration (audio-only clips)
+      if (duration <= 0) {
+        continue;
+      }
 
       const endTime = timelineClip.startTime + duration;
       const isLastClip = i === timelineClips.length - 1;
@@ -258,6 +338,20 @@ export function TimelineProvider({ children, clips }) {
     });
   }, [clips, reflowTimeline]);
 
+  // Update audio-only trim points for a specific timeline clip
+  const updateTimelineClipAudioTrim = useCallback((timelineClipId, audioTrimStart, audioTrimEnd) => {
+    console.log('[TimelineContext] Updating audio trim for timeline clip', timelineClipId, 'to:', { audioTrimStart, audioTrimEnd });
+
+    setTimelineClips(prev =>
+      prev.map(tc =>
+        tc.id === timelineClipId
+          ? { ...tc, audioTrimStart, audioTrimEnd }
+          : tc
+      )
+    );
+    // Note: We don't reflow for audio-only trim changes since they don't affect timeline duration
+  }, []);
+
   // Split a timeline clip by removing a middle section
   const splitTimelineClip = useCallback((timelineClipId, removeStart, removeEnd) => {
     console.log('[TimelineContext] Splitting timeline clip', timelineClipId, 'removing:', { removeStart, removeEnd });
@@ -280,6 +374,8 @@ export function TimelineProvider({ children, clips }) {
 
       const currentTrimStart = originalClip.trimStart ?? 0;
       const currentTrimEnd = originalClip.trimEnd ?? clip.duration;
+      const currentAudioTrimStart = originalClip.audioTrimStart ?? originalClip.trimStart ?? 0;
+      const currentAudioTrimEnd = originalClip.audioTrimEnd ?? originalClip.trimEnd ?? clip.duration;
 
       // Create two new clips from the split
       const firstClip = {
@@ -287,7 +383,14 @@ export function TimelineProvider({ children, clips }) {
         clipIndex: originalClip.clipIndex,
         startTime: 0, // Will be set by reflow
         trimStart: currentTrimStart,
-        trimEnd: currentTrimStart + removeStart
+        trimEnd: currentTrimStart + removeStart,
+        audioTrimStart: currentAudioTrimStart,
+        audioTrimEnd: currentAudioTrimStart + removeStart,
+        customName: originalClip.customName,
+        isAudioLinked: originalClip.isAudioLinked,
+        audioOffset: originalClip.audioOffset,
+        isVideoMuted: originalClip.isVideoMuted,
+        isAudioMuted: originalClip.isAudioMuted
       };
 
       const secondClip = {
@@ -295,7 +398,14 @@ export function TimelineProvider({ children, clips }) {
         clipIndex: originalClip.clipIndex,
         startTime: 0, // Will be set by reflow
         trimStart: currentTrimStart + removeEnd,
-        trimEnd: currentTrimEnd
+        trimEnd: currentTrimEnd,
+        audioTrimStart: currentAudioTrimStart + removeEnd,
+        audioTrimEnd: currentAudioTrimEnd,
+        customName: originalClip.customName,
+        isAudioLinked: originalClip.isAudioLinked,
+        audioOffset: originalClip.audioOffset,
+        isVideoMuted: originalClip.isVideoMuted,
+        isAudioMuted: originalClip.isAudioMuted
       };
 
       // Replace the original clip with the two new clips
@@ -310,6 +420,89 @@ export function TimelineProvider({ children, clips }) {
       const reflowedClips = reflowTimeline(updated, clips);
 
       console.log('[TimelineContext] Timeline clip split and reflowed');
+
+      return reflowedClips;
+    });
+  }, [clips, reflowTimeline]);
+
+  // Split a timeline clip's audio only (video stays intact)
+  const splitTimelineClipAudioOnly = useCallback((timelineClipId, removeStart, removeEnd) => {
+    console.log('[TimelineContext] Splitting audio only for timeline clip', timelineClipId, 'removing:', { removeStart, removeEnd });
+
+    setTimelineClips(prev => {
+      // Find the clip to split
+      const clipIndex = prev.findIndex(tc => tc.id === timelineClipId);
+      if (clipIndex === -1) {
+        console.error('[TimelineContext] Timeline clip not found:', timelineClipId);
+        return prev;
+      }
+
+      const originalClip = prev[clipIndex];
+      const clip = clips[originalClip.clipIndex];
+
+      if (!clip) {
+        console.error('[TimelineContext] Source clip not found');
+        return prev;
+      }
+
+      const currentTrimStart = originalClip.trimStart ?? 0;
+      const currentTrimEnd = originalClip.trimEnd ?? clip.duration;
+      const currentAudioTrimStart = originalClip.audioTrimStart ?? originalClip.trimStart ?? 0;
+      const currentAudioTrimEnd = originalClip.audioTrimEnd ?? originalClip.trimEnd ?? clip.duration;
+      const videoDuration = currentTrimEnd - currentTrimStart;
+
+      // Create two clips:
+      // First clip: full video with first part of audio
+      const firstClip = {
+        id: `timeline-clip-${Date.now()}-${Math.random()}-first`,
+        clipIndex: originalClip.clipIndex,
+        startTime: 0, // Will be set by reflow
+        trimStart: currentTrimStart,
+        trimEnd: currentTrimEnd, // Video stays full range
+        audioTrimStart: currentAudioTrimStart,
+        audioTrimEnd: currentAudioTrimStart + removeStart, // Audio trimmed to first part
+        customName: originalClip.customName,
+        isAudioLinked: true, // Audio is linked (positioned at start of video)
+        audioOffset: 0,
+        isVideoMuted: originalClip.isVideoMuted,
+        isAudioMuted: originalClip.isAudioMuted
+      };
+
+      // Second clip: NO video (zero duration), second part of audio
+      // The video is completely trimmed out so it doesn't take timeline space
+      // Audio is unlinked and positioned to align with where it was in the original video
+      const secondClip = {
+        id: `timeline-clip-${Date.now()}-${Math.random()}-second`,
+        clipIndex: originalClip.clipIndex,
+        startTime: 0, // Will be set by reflow (will be right after first clip)
+        trimStart: currentTrimEnd, // Video trimmed to nothing (start = end)
+        trimEnd: currentTrimEnd,
+        audioTrimStart: currentAudioTrimStart + removeEnd, // Audio starts at removed section end
+        audioTrimEnd: currentAudioTrimEnd,
+        customName: originalClip.customName,
+        isAudioLinked: false, // Audio is UNLINKED so we can position it independently
+        audioOffset: -(videoDuration) + removeEnd, // Position audio relative to where the video would be
+        isVideoMuted: true, // Video is muted (though it has zero duration anyway)
+        isAudioMuted: originalClip.isAudioMuted
+      };
+
+      // Replace the original clip with the two new clips
+      const updated = [
+        ...prev.slice(0, clipIndex),
+        firstClip,
+        secondClip,
+        ...prev.slice(clipIndex + 1)
+      ];
+
+      // Reflow to adjust positions
+      const reflowedClips = reflowTimeline(updated, clips);
+
+      console.log('[TimelineContext] Timeline clip audio split:', {
+        videoDuration,
+        firstAudio: `${firstClip.audioTrimStart}-${firstClip.audioTrimEnd}`,
+        secondAudio: `${secondClip.audioTrimStart}-${secondClip.audioTrimEnd}`,
+        secondAudioOffset: secondClip.audioOffset
+      });
 
       return reflowedClips;
     });
@@ -384,6 +577,58 @@ export function TimelineProvider({ children, clips }) {
     );
   }, []);
 
+  // Toggle audio link (link/unlink audio from video)
+  const toggleAudioLink = useCallback((timelineClipId) => {
+    console.log('[TimelineContext] Toggling audio link for clip', timelineClipId);
+
+    setTimelineClips(prev =>
+      prev.map(tc =>
+        tc.id === timelineClipId
+          ? { ...tc, isAudioLinked: !tc.isAudioLinked, audioOffset: tc.isAudioLinked ? tc.audioOffset : 0 }
+          : tc
+      )
+    );
+  }, []);
+
+  // Update audio offset (when audio is unlinked)
+  const updateAudioOffset = useCallback((timelineClipId, offset) => {
+    console.log('[TimelineContext] Updating audio offset for clip', timelineClipId, 'to:', offset);
+
+    setTimelineClips(prev =>
+      prev.map(tc =>
+        tc.id === timelineClipId
+          ? { ...tc, audioOffset: offset }
+          : tc
+      )
+    );
+  }, []);
+
+  // Toggle video mute
+  const toggleVideoMute = useCallback((timelineClipId) => {
+    console.log('[TimelineContext] Toggling video mute for clip', timelineClipId);
+
+    setTimelineClips(prev =>
+      prev.map(tc =>
+        tc.id === timelineClipId
+          ? { ...tc, isVideoMuted: !tc.isVideoMuted }
+          : tc
+      )
+    );
+  }, []);
+
+  // Toggle audio mute
+  const toggleAudioMute = useCallback((timelineClipId) => {
+    console.log('[TimelineContext] Toggling audio mute for clip', timelineClipId);
+
+    setTimelineClips(prev =>
+      prev.map(tc =>
+        tc.id === timelineClipId
+          ? { ...tc, isAudioMuted: !tc.isAudioMuted }
+          : tc
+      )
+    );
+  }, []);
+
   const value = {
     // State
     timelineClips,
@@ -395,13 +640,22 @@ export function TimelineProvider({ children, clips }) {
     removeClipFromTimeline,
     reorderTimelineClips,
     updateTimelineClipTrim,
+    updateTimelineClipAudioTrim,
     splitTimelineClip,
+    splitTimelineClipAudioOnly,
     renameTimelineClip,
     seekPlayhead,
     getActiveClipAtTime,
+    getAudioSegmentsForClip,
     clearTimeline,
     handleClipDeleted,
-    getClipExtractionParams
+    getClipExtractionParams,
+
+    // Audio/Video separation actions
+    toggleAudioLink,
+    updateAudioOffset,
+    toggleVideoMute,
+    toggleAudioMute
   };
 
   return (

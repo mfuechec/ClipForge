@@ -17,6 +17,7 @@ function DraggableTimelineClip({
   renamingClipId,
   onRename
 }) {
+  const { toggleAudioLink, toggleVideoMute, toggleAudioMute } = useTimeline();
   const [renameValue, setRenameValue] = useState('');
   const isRenaming = renamingClipId === timelineClip.id;
 
@@ -109,7 +110,43 @@ function DraggableTimelineClip({
             />
           </form>
         ) : (
-          <div className="clip-block-name">{displayName}</div>
+          <>
+            <div className="clip-block-name">{displayName}</div>
+            {isSelected && (
+              <div className="clip-controls" onClick={(e) => e.stopPropagation()}>
+                <button
+                  className={`clip-control-btn ${timelineClip.isAudioLinked ? '' : 'active'}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleAudioLink(timelineClip.id);
+                  }}
+                  title={timelineClip.isAudioLinked ? "Unlink audio" : "Link audio"}
+                >
+                  {timelineClip.isAudioLinked ? '🔗' : '🔓'}
+                </button>
+                <button
+                  className={`clip-control-btn ${timelineClip.isVideoMuted ? 'muted' : ''}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleVideoMute(timelineClip.id);
+                  }}
+                  title={timelineClip.isVideoMuted ? "Unmute video" : "Mute video"}
+                >
+                  {timelineClip.isVideoMuted ? '🚫' : '🎬'}
+                </button>
+                <button
+                  className={`clip-control-btn ${timelineClip.isAudioMuted ? 'muted' : ''}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    toggleAudioMute(timelineClip.id);
+                  }}
+                  title={timelineClip.isAudioMuted ? "Unmute audio" : "Mute audio"}
+                >
+                  {timelineClip.isAudioMuted ? '🔇' : '🔊'}
+                </button>
+              </div>
+            )}
+          </>
         )}
         <div className="clip-block-duration">{formatTime(clipDuration)}</div>
       </div>
@@ -150,6 +187,101 @@ function DraggablePlayhead({ playheadTime, getPixelWidth }) {
   );
 }
 
+// Draggable Audio Clip (for independent audio dragging when unlinked)
+function DraggableAudioClip({
+  timelineClip,
+  clip,
+  getPixelWidth,
+  waveform,
+  isSelected
+}) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: `audio-${timelineClip.id}`,
+    data: {
+      type: 'audio-clip',
+      timelineClipId: timelineClip.id
+    },
+    disabled: timelineClip.isAudioLinked // Only draggable when unlinked
+  });
+
+  // Use audio-specific trim values if they exist, otherwise fall back to video trim
+  const audioTrimStart = timelineClip.audioTrimStart ?? timelineClip.trimStart ?? 0;
+  const audioTrimEnd = timelineClip.audioTrimEnd ?? timelineClip.trimEnd ?? clip.duration;
+  const audioDuration = audioTrimEnd - audioTrimStart;
+
+  // Calculate audio position: base startTime + audioOffset when unlinked
+  const audioPosition = timelineClip.startTime + (timelineClip.isAudioLinked ? 0 : timelineClip.audioOffset);
+
+  const style = {
+    position: 'absolute',
+    left: `${getPixelWidth(audioPosition)}px`,
+    width: `${getPixelWidth(audioDuration)}px`,
+    height: '100%',
+    top: 0,
+    opacity: isDragging ? 0.5 : 1,
+    cursor: timelineClip.isAudioLinked ? 'default' : (isDragging ? 'grabbing' : 'grab'),
+    border: isSelected && !timelineClip.isAudioLinked ? '2px solid #8b5cf6' : undefined
+  };
+
+  return (
+    <div
+      ref={setNodeRef}
+      key={`audio-${timelineClip.id}`}
+      className="audio-clip-block"
+      style={style}
+      {...(!timelineClip.isAudioLinked ? listeners : {})}
+      {...(!timelineClip.isAudioLinked ? attributes : {})}
+    >
+      {waveform && waveform.length > 0 ? (
+        <svg
+          width="100%"
+          height="100%"
+          style={{ display: 'block' }}
+          preserveAspectRatio="none"
+        >
+          {(() => {
+            // Calculate which portion of the waveform to show based on audio trim
+            const totalDuration = clip.duration;
+            const startRatio = audioTrimStart / totalDuration;
+            const endRatio = audioTrimEnd / totalDuration;
+            const startIndex = Math.floor(startRatio * waveform.length);
+            const endIndex = Math.ceil(endRatio * waveform.length);
+            const trimmedWaveform = waveform.slice(startIndex, endIndex);
+
+            return trimmedWaveform.map((amplitude, i) => {
+              const x = (i / trimmedWaveform.length) * 100;
+              const height = amplitude * 80;
+              return (
+                <rect
+                  key={i + startIndex}
+                  x={`${x}%`}
+                  y={`${50 - height / 2}%`}
+                  width={`${100 / trimmedWaveform.length}%`}
+                  height={`${height}%`}
+                  fill={timelineClip.isAudioMuted ? '#ef4444' : '#8b5cf6'}
+                  opacity={timelineClip.isAudioMuted ? 0.3 : 0.7}
+                />
+              );
+            });
+          })()}
+        </svg>
+      ) : (
+        <div style={{
+          width: '100%',
+          height: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontSize: '10px',
+          color: '#666'
+        }}>
+          Generating waveform...
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Timeline({
   clips,
   onClipSelect,
@@ -158,6 +290,7 @@ function Timeline({
   onTimelineClipSelect,
   isTrimMode = false,
   trimStartTime = null,
+  trimModeType = 'both',
   isClipMode = false,
   clipStartTime = null,
   transcriptSegments = [],
@@ -167,7 +300,8 @@ function Timeline({
   onSegmentSelect,
   renamingClipId = null,
   onStartRename,
-  onCompleteRename
+  onCompleteRename,
+  waveformsByPath = {}
 }) {
   const { timelineClips, playheadTime, totalDuration } = useTimeline();
 
@@ -199,6 +333,7 @@ function Timeline({
         onTimelineClipSelect={onTimelineClipSelect}
         isTrimMode={isTrimMode}
         trimStartTime={trimStartTime}
+        trimModeType={trimModeType}
         isClipMode={isClipMode}
         clipStartTime={clipStartTime}
         transcriptSegments={transcriptSegments}
@@ -208,6 +343,7 @@ function Timeline({
         onSegmentSelect={onSegmentSelect}
         renamingClipId={renamingClipId}
         onCompleteRename={onCompleteRename}
+        waveformsByPath={waveformsByPath}
       />
     </div>
   );
@@ -226,6 +362,7 @@ function TimelineTrackDroppable({
   onTimelineClipSelect,
   isTrimMode,
   trimStartTime,
+  trimModeType,
   isClipMode,
   clipStartTime,
   transcriptSegments,
@@ -234,7 +371,8 @@ function TimelineTrackDroppable({
   selectedSegmentIndex,
   onSegmentSelect,
   renamingClipId,
-  onCompleteRename
+  onCompleteRename,
+  waveformsByPath
 }) {
   const { setNodeRef, isOver } = useDroppable({
     id: 'timeline-track'
@@ -277,11 +415,16 @@ function TimelineTrackDroppable({
         </div>
       ) : (
         <div className="timeline-track-container" onClick={handleTimelineClick}>
-          <div
-            ref={trackRef}
-            className="timeline-track"
-            style={{ width: `${Math.max(800, getPixelWidth(totalDuration))}px` }}
-          >
+          {/* Dual Track Layout */}
+          <div className="timeline-dual-tracks">
+            {/* Video Track */}
+            <div className="timeline-track-row">
+              <div className="track-label">VIDEO</div>
+              <div
+                ref={trackRef}
+                className="timeline-track video-track"
+                style={{ width: `${Math.max(800, getPixelWidth(totalDuration))}px` }}
+              >
             {/* Transcript Segment Overlays - Only show when transcript panel is open */}
             {!transcriptCollapsed && transcriptSegments.length > 0 && timelineClips.length > 0 && transcriptClipPath && (
               <div className="transcript-segments-overlay">
@@ -370,7 +513,7 @@ function TimelineTrackDroppable({
                 }}
               >
                 <div className="trim-selection-label">
-                  Remove: {formatTime(Math.abs(playheadTime - trimStartTime))}
+                  {trimModeType === 'audio-only' ? '🎵 Audio Trim' : '✂️ Remove'}: {formatTime(Math.abs(playheadTime - trimStartTime))}
                 </div>
               </div>
             )}
@@ -405,6 +548,37 @@ function TimelineTrackDroppable({
             </div>
           </div>
         </div>
+
+        {/* Audio Track */}
+        <div className="timeline-track-row">
+          <div className="track-label">AUDIO</div>
+          <div
+            className="timeline-track audio-track"
+            style={{ width: `${Math.max(800, getPixelWidth(totalDuration))}px` }}
+          >
+            {/* Audio waveforms - draggable when unlinked */}
+            {timelineClips.map((tc) => {
+              const clip = clips[tc.clipIndex];
+              if (!clip) return null;
+
+              const waveform = waveformsByPath[clip.path];
+              const isSelected = tc.id === selectedTimelineClipId;
+
+              return (
+                <DraggableAudioClip
+                  key={`audio-${tc.id}`}
+                  timelineClip={tc}
+                  clip={clip}
+                  getPixelWidth={getPixelWidth}
+                  waveform={waveform}
+                  isSelected={isSelected}
+                />
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
       )}
     </div>
   );

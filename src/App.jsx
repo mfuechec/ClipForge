@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { open, save } from '@tauri-apps/plugin-dialog';
+import { open as openDialog, save } from '@tauri-apps/plugin-dialog';
+import { open as openUrl } from '@tauri-apps/plugin-shell';
 import './App.css';
 import VideoPlayer from './components/VideoPlayer';
 import Timeline from './components/Timeline';
@@ -17,6 +18,7 @@ function AppContent({ clips, setClips }) {
   const [isExporting, setIsExporting] = useState(false);
   const [isTrimMode, setIsTrimMode] = useState(false);
   const [trimStartTime, setTrimStartTime] = useState(null); // Track where trim selection started
+  const [trimModeType, setTrimModeType] = useState('both'); // 'both' or 'audio-only'
   const [isClipMode, setIsClipMode] = useState(false);
   const [clipStartTime, setClipStartTime] = useState(null); // Track where clip selection started
   const [renamingClipId, setRenamingClipId] = useState(null); // Track which timeline clip is being renamed
@@ -25,6 +27,7 @@ function AppContent({ clips, setClips }) {
   const [transcriptCollapsed, setTranscriptCollapsed] = useState(true);
   const [activeId, setActiveId] = useState(null);
   const dragStartTimeRef = useRef(0);
+  const dragStartAudioOffsetRef = useRef(0);
   const currentDragPositionRef = useRef({ x: 0, y: 0 });
 
   // Get timeline state and functions from context
@@ -36,13 +39,17 @@ function AppContent({ clips, setClips }) {
     removeClipFromTimeline,
     reorderTimelineClips,
     updateTimelineClipTrim,
+    updateTimelineClipAudioTrim,
     splitTimelineClip,
+    splitTimelineClipAudioOnly,
     renameTimelineClip,
     seekPlayhead,
     getActiveClipAtTime,
+    getAudioSegmentsForClip,
     clearTimeline,
     handleClipDeleted,
-    getClipExtractionParams
+    getClipExtractionParams,
+    updateAudioOffset
   } = useTimeline();
 
   // Transcript data - per clip transcripts stored by video path
@@ -50,8 +57,41 @@ function AppContent({ clips, setClips }) {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [selectedSegmentIndex, setSelectedSegmentIndex] = useState(null);
 
+  // Waveform data - per clip waveforms stored by video path
+  const [waveformsByPath, setWaveformsByPath] = useState({});
+
   // Get API key from environment variable
   const openaiKey = import.meta.env.VITE_OPENAI_API_KEY || '';
+
+  // Google Drive API key management
+  const [googleDriveApiKey, setGoogleDriveApiKey] = useState(() => {
+    return localStorage.getItem('googleDriveApiKey') || '';
+  });
+  const [showExportDropdown, setShowExportDropdown] = useState(false);
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [exportSuccessData, setExportSuccessData] = useState({ link: '', filename: '' });
+
+  // Save API key to localStorage when it changes
+  useEffect(() => {
+    if (googleDriveApiKey) {
+      localStorage.setItem('googleDriveApiKey', googleDriveApiKey);
+    }
+  }, [googleDriveApiKey]);
+
+  // Close export dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (showExportDropdown && !event.target.closest('.export-dropdown-container')) {
+        setShowExportDropdown(false);
+      }
+    };
+
+    if (showExportDropdown) {
+      document.addEventListener('click', handleClickOutside);
+      return () => document.removeEventListener('click', handleClickOutside);
+    }
+  }, [showExportDropdown]);
 
   // Get the clip that should be playing based on timeline position
   // ONLY play from timeline, not from library selection
@@ -61,6 +101,18 @@ function AppContent({ clips, setClips }) {
   // Get trim points from the timeline clip instance (not the source clip)
   const playingTrimStart = currentTimelineClipInfo ? currentTimelineClipInfo.timelineClip.trimStart : null;
   const playingTrimEnd = currentTimelineClipInfo ? currentTimelineClipInfo.timelineClip.trimEnd : null;
+  // Get audio segments that should be playing (handles multi-part audio from middle trims)
+  const playingAudioSegments = currentTimelineClipInfo ? getAudioSegmentsForClip(currentTimelineClipInfo.timelineClip) : null;
+
+  // Debug: log audio segments when they change
+  useEffect(() => {
+    if (playingAudioSegments) {
+      console.log('[App] Audio segments for playback:', playingAudioSegments);
+    }
+  }, [playingAudioSegments]);
+  // Get audio/video mute states from the timeline clip
+  const playingIsVideoMuted = currentTimelineClipInfo ? currentTimelineClipInfo.timelineClip.isVideoMuted : false;
+  const playingIsAudioMuted = currentTimelineClipInfo ? currentTimelineClipInfo.timelineClip.isAudioMuted : false;
 
   // Get transcript for currently playing clip
   // Filter out segments that start beyond the clip duration (Whisper sometimes generates extra segments)
@@ -144,10 +196,30 @@ function AppContent({ clips, setClips }) {
     }
   };
 
+  // Helper function to import a clip and generate its waveform
+  const importClipWithWaveform = async (path) => {
+    console.log('[App] Importing video from path:', path);
+    const metadata = await invoke('import_video', { path });
+    console.log('[App] Received metadata:', metadata);
+
+    // Generate waveform asynchronously (don't block on this)
+    try {
+      console.log('[App] Generating waveform for:', path);
+      const waveform = await invoke('generate_waveform', { videoPath: path, samples: 200 });
+      console.log('[App] Waveform generated with', waveform.length, 'samples');
+      setWaveformsByPath(prev => ({ ...prev, [path]: waveform }));
+    } catch (error) {
+      console.warn('[App] Failed to generate waveform:', error);
+      // Not critical - continue without waveform
+    }
+
+    return metadata;
+  };
+
   const handleImportVideo = async () => {
     try {
       // Open file dialog
-      const selected = await open({
+      const selected = await openDialog({
         multiple: false,
         filters: [{
           name: 'Video',
@@ -156,10 +228,7 @@ function AppContent({ clips, setClips }) {
       });
 
       if (selected) {
-        // Call Rust command to import video
-        console.log('[App] Importing video from path:', selected);
-        const metadata = await invoke('import_video', { path: selected });
-        console.log('[App] Received metadata:', metadata);
+        const metadata = await importClipWithWaveform(selected);
         setClips([...clips, metadata]);
         // Don't auto-select - let user drag to timeline
       }
@@ -175,9 +244,7 @@ function AppContent({ clips, setClips }) {
       console.log('[App] Recording complete, importing file:', filePath);
 
       // Auto-import the saved file
-      console.log('[App] Importing recording from path:', filePath);
-      const metadata = await invoke('import_video', { path: filePath });
-      console.log('[App] Recording metadata:', metadata);
+      const metadata = await importClipWithWaveform(filePath);
       setClips([...clips, metadata]);
       // Don't auto-select - let user drag to timeline
 
@@ -408,9 +475,7 @@ function AppContent({ clips, setClips }) {
       console.log('[App] Extraction successful:', result);
 
       // Import the extracted clip back into the library
-      const metadata = await invoke('import_video', { path: result });
-      console.log('[App] Imported extracted clip:', metadata);
-
+      const metadata = await importClipWithWaveform(result);
       setClips([...clips, metadata]);
       console.log(`[App] Clip extracted successfully! Duration: ${duration.toFixed(2)}s - Added to media library`);
     } catch (error) {
@@ -490,11 +555,15 @@ function AppContent({ clips, setClips }) {
           return;
         }
 
+        // Check if Shift is pressed for audio-only trim
+        const isAudioOnlyTrim = e.shiftKey;
+
         // If trim not started, start trim selection at current playhead
         if (trimStartTime === null) {
-          console.log('[App] Starting trim selection at playhead:', playheadTime);
+          console.log(`[App] Starting ${isAudioOnlyTrim ? 'audio-only' : 'both'} trim selection at playhead:`, playheadTime);
           setTrimStartTime(playheadTime);
           setIsTrimMode(true);
+          setTrimModeType(isAudioOnlyTrim ? 'audio-only' : 'both');
           return;
         }
 
@@ -551,35 +620,71 @@ function AppContent({ clips, setClips }) {
         const startThreshold = clipDuration * 0.1; // First 10%
         const endThreshold = clipDuration * 0.9;   // Last 10%
 
-        if (selectionStartInClip < startThreshold) {
-          // Trim from the start
-          const currentTrimStart = timelineClip.trimStart ?? 0;
-          const newTrimStart = currentTrimStart + selectionEndInClip;
-          const currentTrimEnd = timelineClip.trimEnd ?? clip.duration;
+        // Apply trim based on mode type
+        if (trimModeType === 'audio-only') {
+          // Audio-only trim mode - update only audio trim points
+          if (selectionStartInClip < startThreshold) {
+            // Trim from the start
+            const currentAudioTrimStart = timelineClip.audioTrimStart ?? timelineClip.trimStart ?? 0;
+            const newAudioTrimStart = currentAudioTrimStart + selectionEndInClip;
+            const currentAudioTrimEnd = timelineClip.audioTrimEnd ?? timelineClip.trimEnd ?? clip.duration;
 
-          console.log('[App] Trimming from start:', { timelineClipId: timelineClip.id, newTrimStart, trimEnd: currentTrimEnd });
-          updateTimelineClipTrim(timelineClip.id, newTrimStart, currentTrimEnd);
-        } else if (selectionEndInClip > endThreshold) {
-          // Trim from the end
-          const currentTrimStart = timelineClip.trimStart ?? 0;
-          const currentTrimEnd = timelineClip.trimEnd ?? clip.duration;
-          const newTrimEnd = currentTrimStart + selectionStartInClip;
+            console.log('[App] Audio-only trimming from start:', { timelineClipId: timelineClip.id, newAudioTrimStart, audioTrimEnd: currentAudioTrimEnd });
+            updateTimelineClipAudioTrim(timelineClip.id, newAudioTrimStart, currentAudioTrimEnd);
+          } else if (selectionEndInClip > endThreshold) {
+            // Trim from the end
+            const currentAudioTrimStart = timelineClip.audioTrimStart ?? timelineClip.trimStart ?? 0;
+            const currentAudioTrimEnd = timelineClip.audioTrimEnd ?? timelineClip.trimEnd ?? clip.duration;
+            const newAudioTrimEnd = currentAudioTrimStart + selectionStartInClip;
 
-          console.log('[App] Trimming from end:', { timelineClipId: timelineClip.id, trimStart: currentTrimStart, newTrimEnd });
-          updateTimelineClipTrim(timelineClip.id, currentTrimStart, newTrimEnd);
+            console.log('[App] Audio-only trimming from end:', { timelineClipId: timelineClip.id, audioTrimStart: currentAudioTrimStart, newAudioTrimEnd });
+            updateTimelineClipAudioTrim(timelineClip.id, currentAudioTrimStart, newAudioTrimEnd);
+          } else {
+            // Trim from the middle - split audio only (video stays intact)
+            console.log('[App] Audio-only trimming from middle - splitting audio:', {
+              timelineClipId: timelineClip.id,
+              removeStart: selectionStartInClip,
+              removeEnd: selectionEndInClip
+            });
+            splitTimelineClipAudioOnly(timelineClip.id, selectionStartInClip, selectionEndInClip);
+          }
         } else {
-          // Trim from the middle - split the clip
-          console.log('[App] Trimming from middle - splitting clip:', {
-            timelineClipId: timelineClip.id,
-            removeStart: selectionStartInClip,
-            removeEnd: selectionEndInClip
-          });
-          splitTimelineClip(timelineClip.id, selectionStartInClip, selectionEndInClip);
+          // Both mode (default) - update video trim points AND audio trim points together
+          if (selectionStartInClip < startThreshold) {
+            // Trim from the start
+            const currentTrimStart = timelineClip.trimStart ?? 0;
+            const newTrimStart = currentTrimStart + selectionEndInClip;
+            const currentTrimEnd = timelineClip.trimEnd ?? clip.duration;
+
+            console.log('[App] Trimming both from start:', { timelineClipId: timelineClip.id, newTrimStart, trimEnd: currentTrimEnd });
+            updateTimelineClipTrim(timelineClip.id, newTrimStart, currentTrimEnd);
+            // Also update audio trim to match video trim in "both" mode
+            updateTimelineClipAudioTrim(timelineClip.id, newTrimStart, currentTrimEnd);
+          } else if (selectionEndInClip > endThreshold) {
+            // Trim from the end
+            const currentTrimStart = timelineClip.trimStart ?? 0;
+            const currentTrimEnd = timelineClip.trimEnd ?? clip.duration;
+            const newTrimEnd = currentTrimStart + selectionStartInClip;
+
+            console.log('[App] Trimming both from end:', { timelineClipId: timelineClip.id, trimStart: currentTrimStart, newTrimEnd });
+            updateTimelineClipTrim(timelineClip.id, currentTrimStart, newTrimEnd);
+            // Also update audio trim to match video trim in "both" mode
+            updateTimelineClipAudioTrim(timelineClip.id, currentTrimStart, newTrimEnd);
+          } else {
+            // Trim from the middle - split the clip
+            console.log('[App] Trimming from middle - splitting clip:', {
+              timelineClipId: timelineClip.id,
+              removeStart: selectionStartInClip,
+              removeEnd: selectionEndInClip
+            });
+            splitTimelineClip(timelineClip.id, selectionStartInClip, selectionEndInClip);
+          }
         }
 
         // Reset trim state
         setTrimStartTime(null);
         setIsTrimMode(false);
+        setTrimModeType('both');
         return;
       }
 
@@ -609,7 +714,7 @@ function AppContent({ clips, setClips }) {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedTimelineClipId, selectedClipIndex, removeClipFromTimeline, handleDeleteClip, trimStartTime, clipStartTime, playheadTime, timelineClips, clips, updateTimelineClipTrim, splitTimelineClip, handleClipModeAction]);
+  }, [selectedTimelineClipId, selectedClipIndex, removeClipFromTimeline, handleDeleteClip, trimStartTime, clipStartTime, playheadTime, timelineClips, clips, updateTimelineClipTrim, updateTimelineClipAudioTrim, splitTimelineClip, splitTimelineClipAudioOnly, handleClipModeAction, trimModeType]);
 
   const handleMergeTimeline = async () => {
     if (timelineClips.length === 0) {
@@ -648,13 +753,19 @@ function AppContent({ clips, setClips }) {
 
       console.log('[App] Merging timeline with', timelineClips.length, 'clips to:', outputPath);
 
-      // Build clip segments array - use timeline clip's trim points
+      // Build clip segments array - use timeline clip's trim points and audio/video settings
       const clipSegments = timelineClips.map(tc => {
         const clip = clips[tc.clipIndex];
         return {
           input_path: clip.path,
           trim_start: tc.trimStart ?? null,
-          trim_end: tc.trimEnd ?? null
+          trim_end: tc.trimEnd ?? null,
+          audio_trim_start: tc.audioTrimStart ?? null,
+          audio_trim_end: tc.audioTrimEnd ?? null,
+          is_video_muted: tc.isVideoMuted ?? false,
+          is_audio_muted: tc.isAudioMuted ?? false,
+          is_audio_linked: tc.isAudioLinked ?? true,
+          audio_offset: tc.audioOffset ?? 0
         };
       });
 
@@ -668,8 +779,7 @@ function AppContent({ clips, setClips }) {
       console.log('[App] Timeline merge successful:', result);
 
       // Import the merged clip back into the library
-      const metadata = await invoke('import_video', { path: result });
-      console.log('[App] Imported merged clip:', metadata);
+      const metadata = await importClipWithWaveform(result);
 
       // Add to clips array
       const newClips = [...clips, metadata];
@@ -723,13 +833,19 @@ function AppContent({ clips, setClips }) {
       if (timelineClips.length > 0) {
         console.log('[App] Exporting timeline with', timelineClips.length, 'clips');
 
-        // Build clip segments array - use timeline clip's trim points
+        // Build clip segments array - use timeline clip's trim points and audio/video settings
         const clipSegments = timelineClips.map(tc => {
           const clip = clips[tc.clipIndex];
           return {
             input_path: clip.path,
             trim_start: tc.trimStart ?? null,
-            trim_end: tc.trimEnd ?? null
+            trim_end: tc.trimEnd ?? null,
+            audio_trim_start: tc.audioTrimStart ?? null,
+            audio_trim_end: tc.audioTrimEnd ?? null,
+            is_video_muted: tc.isVideoMuted ?? false,
+            is_audio_muted: tc.isAudioMuted ?? false,
+            is_audio_linked: tc.isAudioLinked ?? true,
+            audio_offset: tc.audioOffset ?? 0
           };
         });
 
@@ -773,6 +889,111 @@ function AppContent({ clips, setClips }) {
       alert(`Export failed: ${error}`);
     } finally {
       setIsExporting(false);
+    }
+  };
+
+  const handleExportToGoogleDrive = async () => {
+    // Check if there's anything to export
+    if (timelineClips.length === 0 && selectedClipIndex === null) {
+      alert('Please add clips to the timeline or select a clip to export');
+      return;
+    }
+
+    // Check if access token is set
+    if (!googleDriveApiKey.trim()) {
+      const userWantsToSetKey = window.confirm(
+        'Google Drive access token not set. Would you like to configure it now?'
+      );
+      if (userWantsToSetKey) {
+        setShowApiKeyModal(true);
+      }
+      return;
+    }
+
+    try {
+      setIsExporting(true);
+
+      // Determine default filename
+      let defaultFilename = 'exported_video.mp4';
+      if (timelineClips.length > 0) {
+        defaultFilename = 'timeline_export.mp4';
+      } else if (selectedClipIndex !== null) {
+        const clip = clips[selectedClipIndex];
+        defaultFilename = clip.filename.replace(/\.[^/.]+$/, '_exported.mp4');
+      }
+
+      // If timeline has clips, export the full timeline
+      if (timelineClips.length > 0) {
+        console.log('[App] Exporting timeline to Google Drive with', timelineClips.length, 'clips');
+
+        // Build clip segments array - use timeline clip's trim points and audio/video settings
+        const clipSegments = timelineClips.map(tc => {
+          const clip = clips[tc.clipIndex];
+          return {
+            input_path: clip.path,
+            trim_start: tc.trimStart ?? null,
+            trim_end: tc.trimEnd ?? null,
+            audio_trim_start: tc.audioTrimStart ?? null,
+            audio_trim_end: tc.audioTrimEnd ?? null,
+            is_video_muted: tc.isVideoMuted ?? false,
+            is_audio_muted: tc.isAudioMuted ?? false,
+            is_audio_linked: tc.isAudioLinked ?? true,
+            audio_offset: tc.audioOffset ?? 0
+          };
+        });
+
+        const driveLink = await invoke('export_multi_clip_to_google_drive', {
+          options: {
+            clips: clipSegments,
+            filename: defaultFilename,
+            api_key: googleDriveApiKey
+          }
+        });
+
+        console.log('[App] Google Drive export successful:', driveLink);
+        setExportSuccessData({ link: driveLink, filename: defaultFilename });
+        setShowSuccessModal(true);
+      } else if (selectedClipIndex !== null) {
+        // Export single selected clip
+        const clip = clips[selectedClipIndex];
+        console.log('[App] Exporting single clip to Google Drive:', {
+          input: clip.path,
+          filename: defaultFilename,
+          trimStart: clip.trimStart,
+          trimEnd: clip.trimEnd
+        });
+
+        const driveLink = await invoke('export_to_google_drive', {
+          options: {
+            input_path: clip.path,
+            filename: defaultFilename,
+            api_key: googleDriveApiKey,
+            trim_start: clip.trimStart ?? null,
+            trim_end: clip.trimEnd ?? null
+          }
+        });
+
+        console.log('[App] Google Drive export successful:', driveLink);
+        setExportSuccessData({ link: driveLink, filename: defaultFilename });
+        setShowSuccessModal(true);
+      }
+    } catch (error) {
+      console.error('[App] Google Drive export failed:', error);
+
+      // Make error message more user-friendly
+      let errorMessage = error.toString();
+      if (errorMessage.includes('OAuth')) {
+        errorMessage = 'Access token expired or invalid. Please update your Google Drive token.';
+      } else if (errorMessage.includes('network')) {
+        errorMessage = 'Network error. Please check your internet connection.';
+      } else if (errorMessage.length > 100) {
+        errorMessage = 'Export failed. Please try again.';
+      }
+
+      alert(errorMessage);
+    } finally {
+      setIsExporting(false);
+      setShowExportDropdown(false);
     }
   };
 
@@ -834,10 +1055,19 @@ function AppContent({ clips, setClips }) {
   // Drag and drop handlers
   const handleDragStart = useCallback((event) => {
     setActiveId(event.active.id);
-    if (event.active.data.current?.type === 'playhead') {
+    const dragType = event.active.data.current?.type;
+
+    if (dragType === 'playhead') {
       dragStartTimeRef.current = playheadTime;
+    } else if (dragType === 'audio-clip') {
+      // Store the starting audio offset for this clip
+      const timelineClipId = event.active.data.current?.timelineClipId;
+      const timelineClip = timelineClips.find(tc => tc.id === timelineClipId);
+      if (timelineClip) {
+        dragStartAudioOffsetRef.current = timelineClip.audioOffset;
+      }
     }
-  }, [playheadTime]);
+  }, [playheadTime, timelineClips]);
 
   const handleDragMove = useCallback((event) => {
     const { active, delta } = event;
@@ -856,8 +1086,18 @@ function AppContent({ clips, setClips }) {
       const timeDelta = delta.x / pixelsPerSecond;
       const newTime = Math.max(0, Math.min(dragStartTimeRef.current + timeDelta, totalDuration));
       seekPlayhead(newTime);
+    } else if (dragType === 'audio-clip') {
+      // Update audio offset in real-time as user drags
+      const pixelsPerSecond = 20;
+      const timeDelta = delta.x / pixelsPerSecond;
+      const newOffset = dragStartAudioOffsetRef.current + timeDelta;
+      const timelineClipId = active.data.current?.timelineClipId;
+
+      if (timelineClipId) {
+        updateAudioOffset(timelineClipId, newOffset);
+      }
     }
-  }, [totalDuration, seekPlayhead]);
+  }, [totalDuration, seekPlayhead, updateAudioOffset]);
 
   const handleDragEnd = useCallback((event) => {
     setActiveId(null);
@@ -865,6 +1105,12 @@ function AppContent({ clips, setClips }) {
     const dragType = active.data.current?.type;
 
     if (dragType === 'playhead') {
+      return;
+    }
+
+    if (dragType === 'audio-clip') {
+      // Audio offset has already been updated in handleDragMove
+      console.log('[App] Audio clip drag ended');
       return;
     }
 
@@ -991,15 +1237,285 @@ function AppContent({ clips, setClips }) {
           <button className="btn-primary" onClick={handleImportVideo}>
             Import Video
           </button>
-          <button
-            className="btn-secondary"
-            onClick={handleExportVideo}
-            disabled={clips.length === 0 || isExporting}
-          >
-            {isExporting ? 'Exporting...' : 'Export Video'}
-          </button>
+          <div className="export-dropdown-container" style={{ position: 'relative' }}>
+            <button
+              className="btn-secondary"
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowExportDropdown(!showExportDropdown);
+              }}
+              disabled={clips.length === 0 || isExporting}
+              style={{ display: 'flex', alignItems: 'center', gap: '5px' }}
+            >
+              {isExporting ? 'Exporting...' : 'Export Video'}
+              <span style={{ fontSize: '0.8em' }}>▼</span>
+            </button>
+            {showExportDropdown && !isExporting && (
+              <div style={{
+                position: 'absolute',
+                top: '100%',
+                right: 0,
+                marginTop: '5px',
+                backgroundColor: '#2a2a2a',
+                border: '1px solid #444',
+                borderRadius: '4px',
+                boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+                zIndex: 1000,
+                minWidth: '200px'
+              }}>
+                <button
+                  onClick={() => {
+                    setShowExportDropdown(false);
+                    handleExportVideo();
+                  }}
+                  style={{
+                    width: '100%',
+                    padding: '10px 15px',
+                    background: 'none',
+                    border: 'none',
+                    color: 'white',
+                    textAlign: 'left',
+                    cursor: 'pointer',
+                    fontSize: '14px'
+                  }}
+                  onMouseEnter={(e) => e.target.style.backgroundColor = '#3a3a3a'}
+                  onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}
+                >
+                  Export Locally
+                </button>
+                <button
+                  onClick={handleExportToGoogleDrive}
+                  style={{
+                    width: '100%',
+                    padding: '10px 15px',
+                    background: 'none',
+                    border: 'none',
+                    borderTop: '1px solid #444',
+                    color: 'white',
+                    textAlign: 'left',
+                    cursor: 'pointer',
+                    fontSize: '14px'
+                  }}
+                  onMouseEnter={(e) => e.target.style.backgroundColor = '#3a3a3a'}
+                  onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}
+                >
+                  Export to Google Drive
+                </button>
+                <button
+                  onClick={() => {
+                    setShowExportDropdown(false);
+                    setShowApiKeyModal(true);
+                  }}
+                  style={{
+                    width: '100%',
+                    padding: '10px 15px',
+                    background: 'none',
+                    border: 'none',
+                    borderTop: '1px solid #444',
+                    color: '#888',
+                    textAlign: 'left',
+                    cursor: 'pointer',
+                    fontSize: '13px',
+                    fontStyle: 'italic'
+                  }}
+                  onMouseEnter={(e) => e.target.style.backgroundColor = '#3a3a3a'}
+                  onMouseLeave={(e) => e.target.style.backgroundColor = 'transparent'}
+                >
+                  ⚙️ Configure API Key
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
+
+      {/* API Key Configuration Modal */}
+      {showApiKeyModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.7)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 2000
+        }}>
+          <div style={{
+            backgroundColor: '#2a2a2a',
+            padding: '30px',
+            borderRadius: '8px',
+            maxWidth: '500px',
+            width: '90%'
+          }}>
+            <h2 style={{ marginTop: 0, marginBottom: '20px' }}>Google Drive Access Token</h2>
+            <p style={{ color: '#aaa', fontSize: '14px', marginBottom: '15px' }}>
+              Enter your Google Drive OAuth 2.0 access token to enable cloud exports. You can obtain a token from the{' '}
+              <a href="https://developers.google.com/oauthplayground/" target="_blank" rel="noopener noreferrer" style={{ color: '#4a9eff' }}>
+                OAuth 2.0 Playground
+              </a>{' '}
+              (select "Drive API v3" and authorize "https://www.googleapis.com/auth/drive.file" scope).
+            </p>
+            <input
+              type="password"
+              value={googleDriveApiKey}
+              onChange={(e) => setGoogleDriveApiKey(e.target.value)}
+              placeholder="Enter your OAuth 2.0 access token"
+              style={{
+                width: '100%',
+                padding: '10px',
+                backgroundColor: '#1a1a1a',
+                border: '1px solid #444',
+                borderRadius: '4px',
+                color: 'white',
+                fontSize: '14px',
+                marginBottom: '20px'
+              }}
+            />
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setShowApiKeyModal(false)}
+                style={{
+                  padding: '8px 16px',
+                  backgroundColor: '#444',
+                  border: 'none',
+                  borderRadius: '4px',
+                  color: 'white',
+                  cursor: 'pointer'
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => setShowApiKeyModal(false)}
+                style={{
+                  padding: '8px 16px',
+                  backgroundColor: '#4a9eff',
+                  border: 'none',
+                  borderRadius: '4px',
+                  color: 'white',
+                  cursor: 'pointer'
+                }}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Export Success Modal */}
+      {showSuccessModal && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0,0,0,0.7)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 2000
+          }}
+          onClick={() => setShowSuccessModal(false)}
+        >
+          <div
+            style={{
+              backgroundColor: '#2a2a2a',
+              padding: '40px',
+              borderRadius: '12px',
+              maxWidth: '500px',
+              width: '90%',
+              boxShadow: '0 10px 40px rgba(0,0,0,0.5)',
+              textAlign: 'center'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Success Icon */}
+            <div style={{
+              width: '80px',
+              height: '80px',
+              borderRadius: '50%',
+              backgroundColor: '#4caf50',
+              margin: '0 auto 20px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: '48px'
+            }}>
+              ✓
+            </div>
+
+            <h2 style={{
+              marginTop: 0,
+              marginBottom: '15px',
+              color: 'white',
+              fontSize: '24px'
+            }}>
+              Exported Successfully!
+            </h2>
+
+            <p style={{
+              color: '#aaa',
+              fontSize: '15px',
+              marginBottom: '25px',
+              lineHeight: '1.5'
+            }}>
+              Your video <strong style={{ color: '#fff' }}>{exportSuccessData.filename}</strong> has been uploaded to Google Drive in the ClipForge folder.
+            </p>
+
+            <button
+              onClick={() => openUrl(exportSuccessData.link)}
+              style={{
+                display: 'inline-block',
+                padding: '12px 30px',
+                backgroundColor: '#4a9eff',
+                color: 'white',
+                border: 'none',
+                borderRadius: '6px',
+                fontSize: '15px',
+                fontWeight: '500',
+                marginBottom: '15px',
+                cursor: 'pointer',
+                transition: 'background-color 0.2s'
+              }}
+              onMouseEnter={(e) => e.target.style.backgroundColor = '#357abd'}
+              onMouseLeave={(e) => e.target.style.backgroundColor = '#4a9eff'}
+            >
+              Open in Google Drive
+            </button>
+
+            <div>
+              <button
+                onClick={() => setShowSuccessModal(false)}
+                style={{
+                  padding: '10px 24px',
+                  backgroundColor: 'transparent',
+                  border: '1px solid #555',
+                  borderRadius: '6px',
+                  color: '#aaa',
+                  cursor: 'pointer',
+                  fontSize: '14px'
+                }}
+                onMouseEnter={(e) => {
+                  e.target.style.backgroundColor = '#333';
+                  e.target.style.color = '#fff';
+                }}
+                onMouseLeave={(e) => {
+                  e.target.style.backgroundColor = 'transparent';
+                  e.target.style.color = '#aaa';
+                }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Media Library Panel - Left */}
       <MediaLibrary
@@ -1022,6 +1538,9 @@ function AppContent({ clips, setClips }) {
             onVideoLoaded={handleVideoLoaded}
             trimStart={playingTrimStart}
             trimEnd={playingTrimEnd}
+            audioSegments={playingAudioSegments}
+            isVideoMuted={playingIsVideoMuted}
+            isAudioMuted={playingIsAudioMuted}
           />
         </div>
       </div>
@@ -1045,11 +1564,7 @@ function AppContent({ clips, setClips }) {
         <div className="timeline-controls">
           <button
             className="btn-secondary"
-            onClick={() => {
-              if (confirm('Clear timeline? This will remove all clips from the timeline but keep them in the library.')) {
-                clearTimeline();
-              }
-            }}
+            onClick={clearTimeline}
             disabled={timelineClips.length === 0}
           >
             Clear Timeline
@@ -1086,6 +1601,7 @@ function AppContent({ clips, setClips }) {
           onTimelineClipSelect={setSelectedTimelineClipId}
           isTrimMode={isTrimMode}
           trimStartTime={trimStartTime}
+          trimModeType={trimModeType}
           isClipMode={isClipMode}
           clipStartTime={clipStartTime}
           renamingClipId={renamingClipId}
@@ -1095,6 +1611,7 @@ function AppContent({ clips, setClips }) {
           transcriptCollapsed={transcriptCollapsed}
           selectedSegmentIndex={selectedSegmentIndex}
           onSegmentSelect={setSelectedSegmentIndex}
+          waveformsByPath={waveformsByPath}
         />
       </div>
 

@@ -4,17 +4,23 @@ import videojs from 'video.js';
 import 'video.js/dist/video-js.css';
 import './VideoPlayer.css';
 
-function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trimStart, trimEnd }) {
+function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trimStart, trimEnd, audioSegments, isVideoMuted = false, isAudioMuted = false }) {
   const videoRef = useRef(null);
   const playerRef = useRef(null);
   const [playbackRate, setPlaybackRate] = useState(1.0);
   const [isPlaying, setIsPlaying] = useState(false);
+
+  // Web Audio API refs for audio segment control
+  const audioContextRef = useRef(null);
+  const mediaSourceRef = useRef(null);
+  const gainNodeRef = useRef(null);
 
   // Store callbacks in refs to avoid recreating player when callbacks change
   const onTimeUpdateRef = useRef(onTimeUpdate);
   const onVideoLoadedRef = useRef(onVideoLoaded);
   const trimStartRef = useRef(trimStart);
   const trimEndRef = useRef(trimEnd);
+  const audioSegmentsRef = useRef(audioSegments);
 
   // Update refs when callbacks change
   useEffect(() => {
@@ -22,7 +28,40 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
     onVideoLoadedRef.current = onVideoLoaded;
     trimStartRef.current = trimStart;
     trimEndRef.current = trimEnd;
-  }, [onTimeUpdate, onVideoLoaded, trimStart, trimEnd]);
+    audioSegmentsRef.current = audioSegments;
+  }, [onTimeUpdate, onVideoLoaded, trimStart, trimEnd, audioSegments]);
+
+  // Handle audio mute state changes using Web Audio API
+  useEffect(() => {
+    if (gainNodeRef.current) {
+      // Use gain node for muting instead of player.muted()
+      if (isAudioMuted) {
+        gainNodeRef.current.gain.setValueAtTime(0, gainNodeRef.current.context.currentTime);
+      } else {
+        gainNodeRef.current.gain.setValueAtTime(1, gainNodeRef.current.context.currentTime);
+      }
+    }
+  }, [isAudioMuted]);
+
+  // Resume AudioContext on user interaction (required by browsers)
+  useEffect(() => {
+    const resumeAudioContext = () => {
+      if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        console.log('[VideoPlayer] Resuming AudioContext');
+        audioContextRef.current.resume();
+      }
+    };
+
+    // Resume on play event
+    if (playerRef.current) {
+      playerRef.current.on('play', resumeAudioContext);
+      return () => {
+        if (playerRef.current) {
+          playerRef.current.off('play', resumeAudioContext);
+        }
+      };
+    }
+  }, []);
 
   // Initialize player when video element appears, update source when path changes
   useEffect(() => {
@@ -70,6 +109,30 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
 
       playerRef.current = player;
 
+      // Initialize Web Audio API for audio segment control
+      try {
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        audioContextRef.current = audioContext;
+
+        // Create MediaElementSourceNode from the video element
+        const videoElement = player.tech({ IWillNotUseThisInPlugins: true }).el();
+        const mediaSource = audioContext.createMediaElementSource(videoElement);
+        mediaSourceRef.current = mediaSource;
+
+        // Create GainNode for volume control
+        const gainNode = audioContext.createGain();
+        gainNodeRef.current = gainNode;
+
+        // Connect: MediaElementSource -> GainNode -> destination
+        mediaSource.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+
+        console.log('[VideoPlayer] Web Audio API initialized');
+      } catch (error) {
+        console.error('[VideoPlayer] Failed to initialize Web Audio API:', error);
+        // Fall back to regular video playback if Web Audio fails
+      }
+
       // Handle loaded metadata - use ref to get latest callback
       player.on('loadedmetadata', () => {
         if (onVideoLoadedRef.current) {
@@ -91,6 +154,56 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
         // Enforce trim boundaries during playback - use refs to get latest values
         const trimStart = trimStartRef.current;
         const trimEnd = trimEndRef.current;
+        const audioSegments = audioSegmentsRef.current;
+
+        // Dynamic audio muting based on audio segments using Web Audio API
+        if (audioSegments && audioSegments.length > 0 && gainNodeRef.current) {
+          let shouldPlayAudio = false;
+          let isInLastSegment = false;
+
+          // Check if current time falls within any audio segment
+          for (let i = 0; i < audioSegments.length; i++) {
+            const segment = audioSegments[i];
+            const isLastSegment = i === audioSegments.length - 1;
+
+            // For the last segment, be inclusive of the end boundary (use <=)
+            // For other segments, use strict < to detect gaps accurately
+            const withinEnd = isLastSegment
+              ? currentTime <= segment.end
+              : currentTime < segment.end;
+
+            if (currentTime >= segment.start && withinEnd) {
+              shouldPlayAudio = true;
+              isInLastSegment = isLastSegment;
+              break;
+            }
+          }
+
+          const gainNode = gainNodeRef.current;
+          const currentGain = gainNode.gain.value;
+
+          // Debug logging
+          if (Math.floor(currentTime * 10) % 10 === 0) { // Log every second
+            console.log('[VideoPlayer] Audio segments check:', {
+              currentTime,
+              segments: audioSegments,
+              shouldPlayAudio,
+              isInLastSegment,
+              currentGain
+            });
+          }
+
+          // Use Web Audio API gain for smooth volume transitions
+          const targetGain = shouldPlayAudio ? 1 : 0;
+          if (Math.abs(currentGain - targetGain) > 0.01) {
+            console.log('[VideoPlayer] Setting gain from', currentGain, 'to', targetGain, 'at time', currentTime);
+            gainNode.gain.setValueAtTime(targetGain, gainNode.context.currentTime);
+          }
+        } else if (gainNodeRef.current && gainNodeRef.current.gain.value < 0.99) {
+          // No segments - restore gain
+          console.log('[VideoPlayer] No segments - restoring gain to 1');
+          gainNodeRef.current.gain.setValueAtTime(1, gainNodeRef.current.context.currentTime);
+        }
 
         // trimEnd check: if we've reached the end of the trim range, pause
         if (trimEnd != null && currentTime >= trimEnd) {
@@ -138,6 +251,18 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
   // Cleanup on component unmount only
   useEffect(() => {
     return () => {
+      // Close AudioContext
+      if (audioContextRef.current) {
+        console.log('[VideoPlayer] Closing AudioContext on unmount');
+        try {
+          audioContextRef.current.close();
+        } catch (error) {
+          console.warn('[VideoPlayer] Error closing AudioContext:', error);
+        }
+        audioContextRef.current = null;
+      }
+
+      // Dispose player
       if (playerRef.current) {
         console.log('[VideoPlayer] Disposing player on unmount');
         try {
@@ -284,7 +409,7 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
       <div
         className="video-container"
         data-vjs-player
-        style={{ display: videoPath ? 'block' : 'none' }}
+        style={{ display: videoPath ? 'block' : 'none', position: 'relative' }}
       >
         <video
           ref={videoRef}
@@ -296,9 +421,32 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
             aspectRatio: '16/9',
             willChange: 'transform',
             transform: 'translateZ(0)',
-            borderRadius: '8px'
+            borderRadius: '8px',
+            opacity: isVideoMuted ? 0 : 1
           }}
         />
+        {/* Black overlay when video is muted */}
+        {isVideoMuted && videoPath && (
+          <div
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              backgroundColor: '#000',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: '#888',
+              fontSize: '14px',
+              borderRadius: '8px',
+              pointerEvents: 'none'
+            }}
+          >
+            🚫 Video Muted
+          </div>
+        )}
       </div>
 
       {/* Placeholder - only show when no video */}

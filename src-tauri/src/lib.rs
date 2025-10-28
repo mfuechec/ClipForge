@@ -9,6 +9,46 @@ use tauri::State;
 // Native video player module removed - using video.js in frontend instead
 // mod video_player;
 
+// Helper function to find FFmpeg executable in common locations
+fn find_ffmpeg() -> String {
+    // Try common installation paths for macOS
+    let paths = vec![
+        "ffmpeg",                           // In PATH
+        "/opt/homebrew/bin/ffmpeg",         // Apple Silicon Homebrew
+        "/usr/local/bin/ffmpeg",            // Intel Homebrew
+    ];
+
+    for path in paths {
+        if Command::new(path).arg("-version").output().is_ok() {
+            log::info!("Found FFmpeg at: {}", path);
+            return path.to_string();
+        }
+    }
+
+    log::warn!("FFmpeg not found in common locations, falling back to 'ffmpeg'");
+    "ffmpeg".to_string()
+}
+
+// Helper function to find FFprobe executable in common locations
+fn find_ffprobe() -> String {
+    // Try common installation paths for macOS
+    let paths = vec![
+        "ffprobe",                          // In PATH
+        "/opt/homebrew/bin/ffprobe",        // Apple Silicon Homebrew
+        "/usr/local/bin/ffprobe",           // Intel Homebrew
+    ];
+
+    for path in paths {
+        if Command::new(path).arg("-version").output().is_ok() {
+            log::info!("Found FFprobe at: {}", path);
+            return path.to_string();
+        }
+    }
+
+    log::warn!("FFprobe not found in common locations, falling back to 'ffprobe'");
+    "ffprobe".to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VideoMetadata {
     path: String,
@@ -80,7 +120,8 @@ fn import_video(path: String) -> Result<VideoMetadata, String> {
 fn probe_video_metadata(path: &str) -> Result<(f64, u32, u32), String> {
     log::info!("Running ffprobe on: {}", path);
 
-    let output = Command::new("ffprobe")
+    let ffprobe = find_ffprobe();
+    let output = Command::new(&ffprobe)
         .args(&[
             "-v", "quiet",
             "-print_format", "json",
@@ -171,7 +212,8 @@ fn generate_thumbnail(video_path: &str, duration: f64) -> Result<String, String>
     log::info!("Extracting frame at {}s to: {:?}", timestamp, thumbnail_path);
 
     // Use FFmpeg to extract a single frame
-    let output = Command::new("ffmpeg")
+    let ffmpeg = find_ffmpeg();
+    let output = Command::new(&ffmpeg)
         .args(&[
             "-ss", &timestamp.to_string(),  // Seek to timestamp
             "-i", video_path,                // Input video
@@ -199,6 +241,97 @@ fn generate_thumbnail(video_path: &str, duration: f64) -> Result<String, String>
     Ok(thumbnail_path_str)
 }
 
+// Generate waveform data for audio visualization
+#[tauri::command]
+fn generate_waveform(video_path: String, samples: Option<usize>) -> Result<Vec<f32>, String> {
+    let num_samples = samples.unwrap_or(200);
+    log::info!("Generating waveform for: {} with {} samples", video_path, num_samples);
+
+    // First, get the duration of the video
+    let ffprobe = find_ffprobe();
+    let probe_output = Command::new(&ffprobe)
+        .arg("-v").arg("error")
+        .arg("-show_entries").arg("format=duration")
+        .arg("-of").arg("default=noprint_wrappers=1:nokey=1")
+        .arg(&video_path)
+        .output()
+        .map_err(|e| format!("Failed to probe video: {}", e))?;
+
+    let duration_str = String::from_utf8_lossy(&probe_output.stdout);
+    let duration: f64 = duration_str.trim().parse().unwrap_or(0.0);
+
+    if duration <= 0.0 {
+        return Err("Could not determine video duration".to_string());
+    }
+
+    // Use FFmpeg to extract audio peaks at regular intervals
+    // We'll use the volumedetect filter to get volume levels
+    let ffmpeg = find_ffmpeg();
+
+    // Extract audio as raw PCM and get volume stats
+    let temp_audio = std::env::temp_dir().join(format!("waveform_{}.raw", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()));
+
+    let output = Command::new(&ffmpeg)
+        .arg("-i").arg(&video_path)
+        .arg("-vn") // No video
+        .arg("-acodec").arg("pcm_s16le") // PCM 16-bit
+        .arg("-ar").arg("8000") // 8kHz sample rate (enough for visualization)
+        .arg("-ac").arg("1") // Mono
+        .arg("-f").arg("s16le") // Raw PCM output
+        .arg("-y")
+        .arg(&temp_audio)
+        .output()
+        .map_err(|e| format!("Failed to extract audio: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::error!("FFmpeg audio extraction failed: {}", stderr);
+        return Err(format!("Failed to extract audio: {}", stderr));
+    }
+
+    // Read the raw PCM data
+    let audio_data = std::fs::read(&temp_audio).map_err(|e| format!("Failed to read audio data: {}", e))?;
+    let _ = std::fs::remove_file(&temp_audio); // Clean up
+
+    // Convert bytes to i16 samples
+    let mut samples_i16: Vec<i16> = Vec::new();
+    for chunk in audio_data.chunks_exact(2) {
+        let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+        samples_i16.push(sample);
+    }
+
+    if samples_i16.is_empty() {
+        // Silent audio or no audio track
+        return Ok(vec![0.0; num_samples]);
+    }
+
+    // Downsample to the requested number of samples by taking RMS of chunks
+    let chunk_size = samples_i16.len() / num_samples;
+    let mut waveform: Vec<f32> = Vec::new();
+
+    for i in 0..num_samples {
+        let start = i * chunk_size;
+        let end = ((i + 1) * chunk_size).min(samples_i16.len());
+
+        if start >= samples_i16.len() {
+            waveform.push(0.0);
+            continue;
+        }
+
+        // Calculate RMS (root mean square) for this chunk
+        let chunk = &samples_i16[start..end];
+        let sum_squares: f64 = chunk.iter().map(|&s| (s as f64).powi(2)).sum();
+        let rms = (sum_squares / chunk.len() as f64).sqrt();
+
+        // Normalize to 0.0-1.0 range (i16 max is 32767)
+        let normalized = (rms / 32767.0) as f32;
+        waveform.push(normalized);
+    }
+
+    log::info!("Waveform generated with {} data points", waveform.len());
+    Ok(waveform)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ExportOptions {
     input_path: String,
@@ -217,7 +350,8 @@ fn export_video(options: ExportOptions) -> Result<String, String> {
     }
 
     // Build FFmpeg command
-    let mut cmd = Command::new("ffmpeg");
+    let ffmpeg = find_ffmpeg();
+    let mut cmd = Command::new(&ffmpeg);
     cmd.arg("-i").arg(&options.input_path);
 
     // Add trim parameters if specified
@@ -258,6 +392,12 @@ pub struct ClipSegment {
     input_path: String,
     trim_start: Option<f64>,
     trim_end: Option<f64>,
+    audio_trim_start: Option<f64>,
+    audio_trim_end: Option<f64>,
+    is_video_muted: Option<bool>,
+    is_audio_muted: Option<bool>,
+    is_audio_linked: Option<bool>,
+    audio_offset: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -293,20 +433,125 @@ fn export_multi_clip(options: MultiClipExportOptions) -> Result<String, String> 
     let temp_dir = std::env::temp_dir();
     let mut temp_files: Vec<PathBuf> = Vec::new();
 
-    // Step 1: Export each clip with trim applied
+    // Step 1: Export each clip with trim applied and handle audio/video separation
     for (i, clip) in options.clips.iter().enumerate() {
         let temp_path = temp_dir.join(format!("clipforge_temp_{}.mp4", i));
 
         log::info!("Exporting clip {} to temp file: {:?}", i, temp_path);
 
-        let mut cmd = Command::new("ffmpeg");
+        let ffmpeg = find_ffmpeg();
+        let mut cmd = Command::new(&ffmpeg);
         cmd.arg("-i").arg(&clip.input_path);
 
-        // Add trim parameters if specified
-        if let (Some(start), Some(end)) = (clip.trim_start, clip.trim_end) {
-            let duration = end - start;
-            cmd.arg("-ss").arg(start.to_string());
-            cmd.arg("-t").arg(duration.to_string());
+        let is_video_muted = clip.is_video_muted.unwrap_or(false);
+        let is_audio_muted = clip.is_audio_muted.unwrap_or(false);
+        let is_audio_linked = clip.is_audio_linked.unwrap_or(true);
+        let audio_offset = clip.audio_offset.unwrap_or(0.0);
+
+        // Check if audio trim is different from video trim
+        let audio_trim_start = clip.audio_trim_start.or(clip.trim_start);
+        let audio_trim_end = clip.audio_trim_end.or(clip.trim_end);
+        let has_independent_audio_trim = audio_trim_start != clip.trim_start || audio_trim_end != clip.trim_end;
+
+        // Add trim parameters for video (if audio trim is independent, we'll handle it with filters)
+        if !has_independent_audio_trim {
+            // Audio and video trim are the same, apply trim to entire file
+            if let (Some(start), Some(end)) = (clip.trim_start, clip.trim_end) {
+                let duration = end - start;
+                cmd.arg("-ss").arg(start.to_string());
+                cmd.arg("-t").arg(duration.to_string());
+            }
+        }
+
+        // Calculate clip duration for generating placeholders
+        let duration = if let (Some(start), Some(end)) = (clip.trim_start, clip.trim_end) {
+            end - start
+        } else {
+            // Use ffprobe to get duration if not trimmed
+            let ffprobe = find_ffprobe();
+            let probe_output = Command::new(&ffprobe)
+                .arg("-v").arg("error")
+                .arg("-show_entries").arg("format=duration")
+                .arg("-of").arg("default=noprint_wrappers=1:nokey=1")
+                .arg(&clip.input_path)
+                .output()
+                .map_err(|e| format!("Failed to probe clip {}: {}", i, e))?;
+
+            String::from_utf8_lossy(&probe_output.stdout)
+                .trim()
+                .parse::<f64>()
+                .unwrap_or(0.0)
+        };
+
+        // Build filter complex for handling muted tracks, audio offset, and independent audio trim
+        let mut filter_parts = Vec::new();
+        let mut needs_filter = has_independent_audio_trim;
+
+        // Handle video
+        let video_filter = if is_video_muted {
+            needs_filter = true;
+            format!("color=c=black:s=1920x1080:d={},fps=30[v]", duration)
+        } else if has_independent_audio_trim {
+            // Apply video trim using filter
+            needs_filter = true;
+            if let (Some(start), Some(end)) = (clip.trim_start, clip.trim_end) {
+                format!("[0:v]trim=start={}:end={},setpts=PTS-STARTPTS[v]", start, end)
+            } else {
+                "[0:v]null[v]".to_string()
+            }
+        } else {
+            "[0:v]null[v]".to_string()
+        };
+        filter_parts.push(video_filter);
+
+        // Handle audio
+        let audio_filter = if is_audio_muted {
+            needs_filter = true;
+            format!("anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration={}[a]", duration)
+        } else if has_independent_audio_trim {
+            // Apply audio-specific trim
+            needs_filter = true;
+            if let (Some(start), Some(end)) = (audio_trim_start, audio_trim_end) {
+                let mut audio_chain = format!("[0:a]atrim=start={}:end={},asetpts=PTS-STARTPTS", start, end);
+
+                // Add audio offset if needed
+                if !is_audio_linked && audio_offset != 0.0 {
+                    let delay_ms = (audio_offset * 1000.0).round() as i64;
+                    if delay_ms > 0 {
+                        audio_chain.push_str(&format!(",adelay={}|{}", delay_ms, delay_ms));
+                    }
+                }
+
+                audio_chain.push_str("[a]");
+                audio_chain
+            } else {
+                "[0:a]anull[a]".to_string()
+            }
+        } else if !is_audio_linked && audio_offset != 0.0 {
+            needs_filter = true;
+            let delay_ms = (audio_offset * 1000.0).round() as i64;
+            if delay_ms > 0 {
+                format!("[0:a]adelay={}|{}[a]", delay_ms, delay_ms)
+            } else if delay_ms < 0 {
+                format!("[0:a]atrim=start={}[a]", -audio_offset)
+            } else {
+                "[0:a]anull[a]".to_string()
+            }
+        } else {
+            "[0:a]anull[a]".to_string()
+        };
+        filter_parts.push(audio_filter);
+
+        // Add filter_complex and map outputs
+        if needs_filter || is_video_muted || is_audio_muted || (!is_audio_linked && audio_offset != 0.0) {
+            let filter_str = filter_parts.join(";");
+            cmd.arg("-filter_complex").arg(&filter_str);
+            cmd.arg("-map").arg("[v]");
+            cmd.arg("-map").arg("[a]");
+        } else {
+            // No special processing needed, use default mapping
+            cmd.arg("-map").arg("0:v");
+            cmd.arg("-map").arg("0:a");
         }
 
         // Output options - re-encode to ensure compatibility
@@ -317,6 +562,8 @@ fn export_multi_clip(options: MultiClipExportOptions) -> Result<String, String> 
             .arg("-b:a").arg("128k")
             .arg("-y")
             .arg(&temp_path);
+
+        log::info!("FFmpeg command: {:?}", cmd);
 
         let output = cmd.output().map_err(|e| {
             format!("Failed to execute FFmpeg for clip {}: {}", i, e)
@@ -351,7 +598,8 @@ fn export_multi_clip(options: MultiClipExportOptions) -> Result<String, String> 
     log::info!("Created concat file: {:?}", concat_file_path);
 
     // Step 3: Concat all clips
-    let mut concat_cmd = Command::new("ffmpeg");
+    let ffmpeg = find_ffmpeg();
+    let mut concat_cmd = Command::new(&ffmpeg);
     concat_cmd
         .arg("-f").arg("concat")
         .arg("-safe").arg("0")
@@ -418,7 +666,8 @@ fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
     #[cfg(target_os = "macos")]
     {
         // Use FFmpeg to list AVFoundation devices
-        let output = Command::new("ffmpeg")
+        let ffmpeg = find_ffmpeg();
+        let output = Command::new(&ffmpeg)
             .arg("-f").arg("avfoundation")
             .arg("-list_devices").arg("true")
             .arg("-i").arg("")
@@ -513,7 +762,8 @@ fn start_recording(options: StartRecordingOptions, state: State<RecordingState>)
     }
 
     // Build FFmpeg command based on platform and mode
-    let mut cmd = Command::new("ffmpeg");
+    let ffmpeg = find_ffmpeg();
+    let mut cmd = Command::new(&ffmpeg);
 
     #[cfg(target_os = "macos")]
     {
@@ -956,6 +1206,252 @@ fn open_in_native_player(path: String) -> Result<(), String> {
     Ok(())
 }
 
+// ===== GOOGLE DRIVE EXPORT =====
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GoogleDriveConfig {
+    api_key: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GoogleDriveFileMetadata {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parents: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mime_type: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GoogleDriveFile {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GoogleDriveFileList {
+    files: Vec<GoogleDriveFile>,
+}
+
+// Find or create ClipForge folder in Google Drive
+async fn get_or_create_clipforge_folder(api_key: &str) -> Result<String, String> {
+    log::info!("Getting or creating ClipForge folder");
+
+    let client = reqwest::Client::new();
+
+    // Search for existing ClipForge folder
+    let search_url = "https://www.googleapis.com/drive/v3/files";
+    let query = "name='ClipForge' and mimeType='application/vnd.google-apps.folder' and trashed=false";
+
+    let response = client
+        .get(search_url)
+        .query(&[("q", query), ("fields", "files(id,name)")])
+        .header("Authorization", format!("Bearer {}", api_key))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to search for ClipForge folder: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(format!("Google Drive API error ({}): {}. Please check your OAuth access token.", status, error_text));
+    }
+
+    let file_list: GoogleDriveFileList = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse folder search response: {}", e))?;
+
+    // If folder exists, return its ID
+    if let Some(folder) = file_list.files.first() {
+        log::info!("Found existing ClipForge folder: {}", folder.id);
+        return Ok(folder.id.clone());
+    }
+
+    // Create new folder
+    log::info!("Creating new ClipForge folder");
+    let folder_metadata = GoogleDriveFileMetadata {
+        name: "ClipForge".to_string(),
+        parents: None,
+        mime_type: Some("application/vnd.google-apps.folder".to_string()),
+    };
+
+    let create_response = client
+        .post(search_url)
+        .query(&[("fields", "id,name")])
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&folder_metadata)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to create ClipForge folder: {}", e))?;
+
+    if !create_response.status().is_success() {
+        let status = create_response.status();
+        let error_text = create_response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(format!("Failed to create folder ({}): {}", status, error_text));
+    }
+
+    let created_folder: GoogleDriveFile = create_response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse folder creation response: {}", e))?;
+
+    log::info!("Created ClipForge folder: {}", created_folder.id);
+    Ok(created_folder.id)
+}
+
+// Upload file to Google Drive
+async fn upload_to_google_drive(file_path: &str, filename: &str, folder_id: &str, api_key: &str) -> Result<String, String> {
+    log::info!("Uploading {} to Google Drive folder {}", filename, folder_id);
+
+    let client = reqwest::Client::new();
+
+    // Read the video file
+    let file_data = std::fs::read(file_path)
+        .map_err(|e| format!("Failed to read video file: {}", e))?;
+
+    let file_size = file_data.len();
+    log::info!("File size: {} bytes ({:.2} MB)", file_size, file_size as f64 / 1_048_576.0);
+
+    // Create metadata
+    let metadata = GoogleDriveFileMetadata {
+        name: filename.to_string(),
+        parents: Some(vec![folder_id.to_string()]),
+        mime_type: Some("video/mp4".to_string()),
+    };
+
+    let metadata_json = serde_json::to_string(&metadata)
+        .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
+
+    // Create multipart upload
+    let metadata_part = reqwest::multipart::Part::text(metadata_json)
+        .mime_str("application/json")
+        .map_err(|e| format!("Failed to create metadata part: {}", e))?;
+
+    let file_part = reqwest::multipart::Part::bytes(file_data)
+        .file_name(filename.to_string())
+        .mime_str("video/mp4")
+        .map_err(|e| format!("Failed to create file part: {}", e))?;
+
+    let form = reqwest::multipart::Form::new()
+        .part("metadata", metadata_part)
+        .part("file", file_part);
+
+    // Upload to Google Drive (multipart upload)
+    let upload_url = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink";
+
+    log::info!("Sending upload request...");
+    let response = client
+        .post(upload_url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to upload to Google Drive: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(format!("Upload failed ({}): {}", status, error_text));
+    }
+
+    let upload_response: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse upload response: {}", e))?;
+
+    let file_id = upload_response["id"]
+        .as_str()
+        .ok_or("No file ID in response")?
+        .to_string();
+
+    let web_view_link = upload_response["webViewLink"]
+        .as_str()
+        .unwrap_or("No link available");
+
+    log::info!("Upload successful! File ID: {}, Link: {}", file_id, web_view_link);
+    Ok(web_view_link.to_string())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GoogleDriveExportOptions {
+    input_path: String,
+    filename: String,
+    api_key: String,
+    trim_start: Option<f64>,
+    trim_end: Option<f64>,
+}
+
+#[tauri::command]
+async fn export_to_google_drive(options: GoogleDriveExportOptions) -> Result<String, String> {
+    log::info!("Starting Google Drive export: {}", options.filename);
+
+    // First, export the video locally to a temp file
+    let temp_dir = std::env::temp_dir();
+    let temp_output = temp_dir.join(format!("clipforge_gdrive_{}", options.filename));
+    let temp_output_str = temp_output.to_string_lossy().to_string();
+
+    log::info!("Exporting to temp file: {}", temp_output_str);
+
+    // Export video locally first
+    export_video(ExportOptions {
+        input_path: options.input_path.clone(),
+        output_path: temp_output_str.clone(),
+        trim_start: options.trim_start,
+        trim_end: options.trim_end,
+    })?;
+
+    // Get or create ClipForge folder
+    let folder_id = get_or_create_clipforge_folder(&options.api_key).await?;
+
+    // Upload to Google Drive
+    let drive_link = upload_to_google_drive(&temp_output_str, &options.filename, &folder_id, &options.api_key).await?;
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(temp_output);
+
+    log::info!("Google Drive export complete: {}", drive_link);
+    Ok(drive_link)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GoogleDriveMultiClipExportOptions {
+    clips: Vec<ClipSegment>,
+    filename: String,
+    api_key: String,
+}
+
+#[tauri::command]
+async fn export_multi_clip_to_google_drive(options: GoogleDriveMultiClipExportOptions) -> Result<String, String> {
+    log::info!("Starting multi-clip Google Drive export: {}", options.filename);
+
+    // First, export the multi-clip video locally to a temp file
+    let temp_dir = std::env::temp_dir();
+    let temp_output = temp_dir.join(format!("clipforge_gdrive_{}", options.filename));
+    let temp_output_str = temp_output.to_string_lossy().to_string();
+
+    log::info!("Exporting multi-clip to temp file: {}", temp_output_str);
+
+    // Export multi-clip video locally first
+    export_multi_clip(MultiClipExportOptions {
+        clips: options.clips,
+        output_path: temp_output_str.clone(),
+    })?;
+
+    // Get or create ClipForge folder
+    let folder_id = get_or_create_clipforge_folder(&options.api_key).await?;
+
+    // Upload to Google Drive
+    let drive_link = upload_to_google_drive(&temp_output_str, &options.filename, &folder_id, &options.api_key).await?;
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(temp_output);
+
+    log::info!("Google Drive multi-clip export complete: {}", drive_link);
+    Ok(drive_link)
+}
+
 // ===== TRANSCRIPTION =====
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1011,7 +1507,8 @@ fn extract_audio(video_path: &str) -> Result<PathBuf, String> {
     log::info!("Checking for audio stream in: {}", video_path);
 
     // First, check if the video has an audio stream using ffprobe
-    let probe_output = Command::new("ffprobe")
+    let ffprobe = find_ffprobe();
+    let probe_output = Command::new(&ffprobe)
         .args(&[
             "-v", "quiet",
             "-print_format", "json",
@@ -1041,7 +1538,8 @@ fn extract_audio(video_path: &str) -> Result<PathBuf, String> {
     let temp_dir = std::env::temp_dir();
     let audio_path = temp_dir.join("clipforge_audio.mp3");
 
-    let output = Command::new("ffmpeg")
+    let ffmpeg = find_ffmpeg();
+    let output = Command::new(&ffmpeg)
         .args(&[
             "-i", video_path,
             "-vn",  // No video
@@ -1061,7 +1559,8 @@ fn extract_audio(video_path: &str) -> Result<PathBuf, String> {
     }
 
     // Verify extracted audio duration matches video
-    let audio_probe = Command::new("ffprobe")
+    let ffprobe = find_ffprobe();
+    let audio_probe = Command::new(&ffprobe)
         .args(&[
             "-v", "quiet",
             "-print_format", "json",
@@ -1188,6 +1687,7 @@ async fn transcribe_video(video_path: String, api_key: String) -> Result<Transcr
 pub fn run() {
   tauri::Builder::default()
     .plugin(tauri_plugin_dialog::init())
+    .plugin(tauri_plugin_shell::init())
     .manage(RecordingState {
       process: Mutex::new(None),
     })
@@ -1195,11 +1695,14 @@ pub fn run() {
       import_video,
       export_video,
       export_multi_clip,
+      export_to_google_drive,
+      export_multi_clip_to_google_drive,
       start_recording,
       stop_recording,
       open_in_native_player,
       list_audio_devices,
-      transcribe_video
+      transcribe_video,
+      generate_waveform
     ])
     .register_uri_scheme_protocol("video", |_app, request| {
       use tauri::http::{Response, StatusCode};

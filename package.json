@@ -83,6 +83,7 @@
     "@kayvan/markdown-tree-parser": "^1.6.1",
     "@tauri-apps/api": "^2.9.0",
     "@tauri-apps/plugin-dialog": "^2.4.2",
+    "@tauri-apps/plugin-shell": "^2.3.3",
     "chalk": "^4.1.2",
     "commander": "^14.0.0",
     "comment-json": "^4.2.5",

@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "ClipForge",
         "width": 1200,
         "height": 800,
@@ -26,7 +27,18 @@
       "assetProtocol": {
         "enable": true,
         "scope": ["**"]
-      }
+      },
+      "capabilities": [
+        {
+          "identifier": "main-capability",
+          "windows": ["main"],
+          "permissions": [
+            "core:default",
+            "dialog:default",
+            "shell:allow-open"
+          ]
+        }
+      ]
     },
     "withGlobalTauri": false
   },

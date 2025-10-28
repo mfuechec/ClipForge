@@ -1,5 +1,181 @@
 # ClipForge Memory Bank
 
+## Latest Update: Web Audio API Refactoring for Multi-Segment Audio Playback
+
+### Date: October 28, 2025
+### Status: ✅ COMPLETE
+
+Implemented Web Audio API-based audio control to support accurate playback of audio segments with gaps, enabling proper preview of Shift-T middle trim operations that split audio into multiple non-contiguous segments.
+
+### Architecture Change
+
+**Previous Architecture:**
+- Direct HTML5 video element audio playback
+- Simple trim boundaries (audioTrimStart, audioTrimEnd)
+- Volume-based muting for gaps (incomplete, caused issues)
+
+**New Architecture:**
+```
+Video Element → MediaElementSourceNode → GainNode → Audio Output
+                                           ↑
+                                Dynamic gain control (0 or 1)
+```
+
+**Key Components:**
+- `AudioContext`: Web Audio API context managing the audio graph
+- `MediaElementSourceNode`: Routes video element audio through Web Audio API
+- `GainNode`: Provides precise volume control for segment-based audio playback
+- Audio segments array: `[{start, end}, {start, end}, ...]` representing playable ranges
+
+### Files Modified
+
+#### 1. src/components/VideoPlayer.jsx
+**Purpose:** Core video player component with Web Audio API integration
+
+**Key Changes:**
+1. Added Web Audio API refs (audioContextRef, mediaSourceRef, gainNodeRef)
+2. Initialized Web Audio API graph when player is created (lines 113-134)
+3. Replaced simple trim boundaries with multi-segment audio support
+4. Implemented smart boundary checking (lines 159-206):
+   - Last segment uses `<=` (inclusive) to play to the very end
+   - Other segments use `<` (exclusive) for accurate gap detection
+5. Added AudioContext state management (resume on play, cleanup on unmount)
+6. Updated audio mute handling to use GainNode instead of player.muted()
+
+**Critical Code:**
+```javascript
+// Dynamic audio muting based on audio segments using Web Audio API
+if (audioSegments && audioSegments.length > 0 && gainNodeRef.current) {
+  let shouldPlayAudio = false;
+
+  for (let i = 0; i < audioSegments.length; i++) {
+    const segment = audioSegments[i];
+    const isLastSegment = i === audioSegments.length - 1;
+
+    // For the last segment, be inclusive of the end boundary (use <=)
+    // For other segments, use strict < to detect gaps accurately
+    const withinEnd = isLastSegment
+      ? currentTime <= segment.end
+      : currentTime < segment.end;
+
+    if (currentTime >= segment.start && withinEnd) {
+      shouldPlayAudio = true;
+      break;
+    }
+  }
+
+  const targetGain = shouldPlayAudio ? 1 : 0;
+  if (Math.abs(currentGain - targetGain) > 0.01) {
+    gainNode.gain.setValueAtTime(targetGain, gainNode.context.currentTime);
+  }
+}
+```
+
+#### 2. src/TimelineContext.jsx
+**Purpose:** Timeline state management and audio segment calculation
+
+**Key Changes:**
+Added `getAudioSegmentsForClip()` function (lines 203-270) that:
+1. Starts with the video clip's own audio range
+2. Finds adjacent audio-only clips (zero video duration) from the same source
+3. Returns array of audio segments with proper timing
+
+**Critical Logic:**
+```javascript
+// After Shift-T middle trim, the second audio clip is ADJACENT (next in sequence)
+const currentIndex = timelineClips.findIndex(tc => tc.id === videoTimelineClip.id);
+
+for (let i = 0; i < timelineClips.length; i++) {
+  const tc = timelineClips[i];
+
+  // Skip self
+  if (tc.id === videoTimelineClip.id) continue;
+
+  // Check if it's from the same source clip
+  if (tc.clipIndex !== videoTimelineClip.clipIndex) continue;
+
+  // Check if it's an audio-only clip (zero video duration)
+  const tcDuration = (tc.trimEnd ?? clip.duration) - (tc.trimStart ?? 0);
+  if (tcDuration > 0) continue; // Has video, not audio-only
+
+  // If this is an adjacent audio-only clip from the same source
+  if (i === currentIndex + 1) {
+    segments.push({
+      start: tc.audioTrimStart ?? 0,
+      end: tc.audioTrimEnd ?? clip.duration
+    });
+  }
+}
+```
+
+#### 3. src/App.jsx
+**Purpose:** Main application component, passes audio segments to VideoPlayer
+
+**Key Changes:**
+1. Added `getAudioSegmentsForClip` from TimelineContext (line 48)
+2. Calculated `playingAudioSegments` for current timeline clip (line 105)
+3. Passed `audioSegments` prop to VideoPlayer (replacing audioTrimStart/audioTrimEnd) (line 1534)
+4. Added debug logging for audio segments
+
+### Problems Solved
+
+#### Problem 1: Audio doesn't return after gap in middle trim
+**Root Cause:** Audio segment detection was checking for timeline overlap, but after Shift-T middle trim, clips are sequential (adjacent), not overlapping.
+
+**Solution:** Changed detection from overlap to adjacency checking (`i === currentIndex + 1`)
+
+**Location:** `src/TimelineContext.jsx:203-270`
+
+#### Problem 2: Last few seconds of clips are silent
+**Root Cause:** Boundary check `currentTime < segment.end` cut off audio at exact end time.
+
+**Failed Attempts:**
+1. Hardcoded tolerance: `currentTime <= segment.end + 0.1` (rejected as inaccurate)
+2. Skip checks for single segments (broke trimmed single-segment clips)
+
+**Final Solution:** Conditional boundary checking - inclusive `<=` for last segment only, exclusive `<` for others. This works because:
+- Unedited clips: last (only) segment plays to the end
+- Trimmed clips: respects boundaries while playing to the end
+- Multi-segment clips: middle segments detect gaps accurately, last plays to end
+- No hardcoded tolerances needed
+
+**Location:** `src/components/VideoPlayer.jsx:159-206`
+
+### Use Cases Supported
+
+1. **Unedited clips:** Single segment, plays full audio
+2. **Edge trim (T):** Single segment with trimmed boundaries
+3. **Middle trim (Shift-T):** Two video clips with continuous audio
+4. **Middle audio-only trim (Shift-T):** Video clip + separate audio-only clip with gap
+5. **Multiple middle trims:** Multiple segments with gaps
+
+### Future Capabilities Enabled
+
+The Web Audio API architecture now supports:
+- Audio replacement in specific segments
+- Multiple audio tracks (voiceover, music, sound effects)
+- Real-time audio effects (EQ, compression, reverb)
+- Audio mixing and crossfading
+- Advanced audio processing pipelines
+
+### Testing Notes
+
+- ✅ Tested with unedited clips - audio plays to the very end
+- ✅ Tested with single-segment trims - respects boundaries
+- ✅ Tested with multi-segment clips - gaps are accurate, no silence at ends
+- ✅ AudioContext resumes properly on user interaction
+- ✅ Proper cleanup on component unmount prevents memory leaks
+
+### Key Learnings
+
+1. Web Audio API requires MediaElementSourceNode to be created only once per element
+2. AudioContext may start in 'suspended' state and needs resume() on user interaction
+3. Boundary checks need different logic for last segment vs middle segments
+4. Hardcoded tolerances should be avoided in favor of precise algorithmic solutions
+5. Adjacent timeline clips require different detection logic than overlapping clips
+
+---
+
 ## Project Overview
 **ClipForge** is a desktop video editor built with Tauri + React for the GauntletAI bootcamp.
 - **Timeline**: Built in 3 days (MVP due Tuesday 10:59 PM CT)
