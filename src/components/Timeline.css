@@ -1,11 +1,11 @@
 /* Timeline Container */
 .timeline {
   flex: 1;
-  padding: 12px 24px;
+  padding: 16px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 /* Section Headers */
@@ -21,13 +21,9 @@
 }
 
 /* ========== MEDIA LIBRARY ========== */
+/* Media library is now in the left panel, hide it from timeline */
 .media-library {
-  flex-shrink: 0;
-  min-height: 100px;
-  max-height: 100px;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
+  display: none;
 }
 
 .library-empty {
@@ -122,33 +118,111 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  transition: background-color 0.2s ease;
 }
 
 .timeline-empty {
-  padding: 20px;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px;
   text-align: center;
-  color: #666;
-  font-size: 12px;
-  background: #1a1a1a;
-  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
+  border: 2px dashed var(--border);
+  margin: 8px;
+  transition: all 0.2s ease;
+}
+
+.timeline-empty:hover {
+  border-color: var(--accent-primary);
+  background: rgba(99, 102, 241, 0.05);
+  color: var(--text-primary);
 }
 
 .timeline-track-container {
-  background: #1a1a1a;
-  border-radius: 6px;
+  background: var(--bg-secondary);
+  border-radius: 8px;
   padding: 12px;
   overflow-x: auto;
   overflow-y: hidden;
   flex: 1;
   min-height: 0;
+  margin: 8px;
 }
 
 .timeline-track {
   position: relative;
   height: 70px;
   min-width: 100%;
-  background: #0f0f0f;
-  border-radius: 4px;
+  background: var(--bg-secondary);
+  border-radius: 6px;
+}
+
+/* Multi-Track Layout */
+.timeline-tracks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+}
+
+.track {
+  min-height: 80px;
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+  padding: 8px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.track-label {
+  width: 80px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.track-content {
+  flex: 1;
+  height: 64px;
+  position: relative;
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+/* Audio Waveform Track */
+.audio-track {
+  position: relative;
+  height: 64px;
+  background: var(--bg-secondary);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.waveform {
+  width: 100%;
+  height: 100%;
+  background: repeating-linear-gradient(
+    90deg,
+    transparent,
+    transparent 10px,
+    rgba(139, 92, 246, 0.05) 10px,
+    rgba(139, 92, 246, 0.05) 11px
+  );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
 /* Timeline Clip Blocks */

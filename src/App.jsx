@@ -5,7 +5,10 @@ import './App.css';
 import VideoPlayer from './components/VideoPlayer';
 import Timeline from './components/Timeline';
 import RecordingControls from './components/RecordingControls';
+import MediaLibrary from './components/MediaLibrary';
+import TranscriptPanel from './components/TranscriptPanel';
 import { TimelineProvider, useTimeline } from './TimelineContext';
+import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
 
 function AppContent({ clips, setClips }) {
   const [selectedClipIndex, setSelectedClipIndex] = useState(null);
@@ -14,6 +17,10 @@ function AppContent({ clips, setClips }) {
   const [isExporting, setIsExporting] = useState(false);
   const [isTrimMode, setIsTrimMode] = useState(false);
   const [trimStartTime, setTrimStartTime] = useState(null); // Track where trim selection started
+  const [mediaLibraryCollapsed, setMediaLibraryCollapsed] = useState(true);
+  const [transcriptCollapsed, setTranscriptCollapsed] = useState(true);
+  const [activeId, setActiveId] = useState(null);
+  const dragStartTimeRef = useRef(0);
 
   // Get timeline state and functions from context
   const {
@@ -30,10 +37,99 @@ function AppContent({ clips, setClips }) {
     handleClipDeleted
   } = useTimeline();
 
+  // Transcript data - per clip transcripts stored by video path
+  const [transcriptsByPath, setTranscriptsByPath] = useState({});
+  const [isTranscribing, setIsTranscribing] = useState(false);
+
+  // Get API key from environment variable
+  const openaiKey = import.meta.env.VITE_OPENAI_API_KEY || '';
+
+  // Get the clip that should be playing based on timeline position
+  // ONLY play from timeline, not from library selection
+  const currentTimelineClipInfo = getActiveClipAtTime(playheadTime);
+  const playingClip = currentTimelineClipInfo ? currentTimelineClipInfo.clip : null;
+  const playingClipTime = currentTimelineClipInfo ? currentTimelineClipInfo.offsetInClip : 0;
+  // Get trim points from the timeline clip instance (not the source clip)
+  const playingTrimStart = currentTimelineClipInfo ? currentTimelineClipInfo.timelineClip.trimStart : null;
+  const playingTrimEnd = currentTimelineClipInfo ? currentTimelineClipInfo.timelineClip.trimEnd : null;
+
+  // Get transcript for currently playing clip
+  const transcriptSegments = playingClip ? (transcriptsByPath[playingClip.path] || []) : [];
+
+  // Configure drag sensors
+  const sensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: {
+        distance: 8
+      }
+    })
+  );
+
   // Debug hook - access clips in console via window.__clips
   useEffect(() => {
     window.__clips = clips;
   }, [clips]);
+
+  // Auto-expand media library when clips are added
+  useEffect(() => {
+    if (clips.length > 0 && mediaLibraryCollapsed) {
+      setMediaLibraryCollapsed(false);
+    }
+  }, [clips.length]); // Only watch clips.length to avoid closing when clips change
+
+  // Auto-expand transcript panel when transcript is available
+  useEffect(() => {
+    if (transcriptSegments.length > 0 && transcriptCollapsed) {
+      setTranscriptCollapsed(false);
+    }
+  }, [transcriptSegments.length, transcriptCollapsed]);
+
+  // Handle transcription
+  const handleTranscribeVideo = async () => {
+    // Use the first clip with video if no clip is currently playing
+    const clipToTranscribe = playingClip || (clips.length > 0 ? clips[0] : null);
+
+    if (!clipToTranscribe) {
+      alert('No video available. Please import a video first.');
+      return;
+    }
+
+    if (!openaiKey) {
+      alert('OpenAI API key not found.\n\nPlease add VITE_OPENAI_API_KEY to your .env file.\n\nGet your API key at: https://platform.openai.com/api-keys');
+      return;
+    }
+
+    setIsTranscribing(true);
+    try {
+      console.log('[App] Starting transcription for:', clipToTranscribe.path);
+      const result = await invoke('transcribe_video', {
+        videoPath: clipToTranscribe.path,
+        apiKey: openaiKey
+      });
+
+      console.log('[App] Transcription result:', result);
+
+      // Convert segments to match our format (start instead of time)
+      const segments = result.segments.map(seg => ({
+        time: seg.start,
+        text: seg.text,
+        isFiller: seg.is_filler,
+        confidence: seg.confidence
+      }));
+
+      setTranscriptsByPath(prev => ({
+        ...prev,
+        [clipToTranscribe.path]: segments
+      }));
+
+      alert(`Transcription complete! Found ${segments.length} segments.`);
+    } catch (error) {
+      console.error('[App] Transcription failed:', error);
+      alert(`Transcription failed: ${error}`);
+    } finally {
+      setIsTranscribing(false);
+    }
+  };
 
   const handleImportVideo = async () => {
     try {
@@ -414,18 +510,9 @@ function AppContent({ clips, setClips }) {
 
   const selectedClip = selectedClipIndex !== null ? clips[selectedClipIndex] : null;
 
-  // Get the clip that should be playing based on timeline position
-  // ONLY play from timeline, not from library selection
-  const currentTimelineClipInfo = getActiveClipAtTime(playheadTime);
+  // Debug logging
   console.log('[App] getActiveClipAtTime returned:', currentTimelineClipInfo);
   console.log('[App] playheadTime:', playheadTime, 'timelineClips.length:', timelineClips.length);
-
-  const playingClip = currentTimelineClipInfo ? currentTimelineClipInfo.clip : null;
-  const playingClipTime = currentTimelineClipInfo ? currentTimelineClipInfo.offsetInClip : 0;
-  // Get trim points from the timeline clip instance (not the source clip)
-  const playingTrimStart = currentTimelineClipInfo ? currentTimelineClipInfo.timelineClip.trimStart : null;
-  const playingTrimEnd = currentTimelineClipInfo ? currentTimelineClipInfo.timelineClip.trimEnd : null;
-
   console.log('[App] VideoPlayer will receive:');
   console.log('[App]   videoPath:', playingClip?.path);
   console.log('[App]   currentTime:', playingClipTime);
@@ -476,9 +563,90 @@ function AppContent({ clips, setClips }) {
     }
   }, [timelineClips.length, seekPlayhead, playheadTime]); // Proper dependencies
 
+  // Drag and drop handlers
+  const handleDragStart = useCallback((event) => {
+    setActiveId(event.active.id);
+    if (event.active.data.current?.type === 'playhead') {
+      dragStartTimeRef.current = playheadTime;
+    }
+  }, [playheadTime]);
+
+  const handleDragMove = useCallback((event) => {
+    const { active, delta } = event;
+    const dragType = active.data.current?.type;
+
+    if (dragType === 'playhead') {
+      const pixelsPerSecond = 20;
+      const timeDelta = delta.x / pixelsPerSecond;
+      const newTime = Math.max(0, Math.min(dragStartTimeRef.current + timeDelta, totalDuration));
+      seekPlayhead(newTime);
+    }
+  }, [totalDuration, seekPlayhead]);
+
+  const handleDragEnd = useCallback((event) => {
+    setActiveId(null);
+    const { active, over } = event;
+    const dragType = active.data.current?.type;
+
+    if (dragType === 'playhead') {
+      return;
+    }
+
+    // Handle media clip dragging to timeline
+    if (dragType === 'media-clip' && over?.id === 'timeline-track') {
+      const clipIndex = active.data.current.clipIndex;
+      const clip = clips[clipIndex];
+
+      if (!clip || !clip.duration) {
+        alert('Please wait for the clip to load before adding to timeline');
+        return;
+      }
+
+      addClipToTimeline(clipIndex, null, clips);
+      return;
+    }
+
+    // Handle timeline clip dragging back to media library (remove from timeline)
+    if (dragType === 'timeline-clip' && (over?.id === 'media-library' || !over)) {
+      const timelineClipId = active.data.current.timelineClipId;
+      removeClipFromTimeline(timelineClipId);
+      return;
+    }
+  }, [clips, addClipToTimeline, removeClipFromTimeline]);
+
+  // Get active dragged item for overlay
+  const getActiveItem = useCallback(() => {
+    if (!activeId) return null;
+
+    if (activeId.startsWith('media-clip-')) {
+      const index = parseInt(activeId.replace('media-clip-', ''));
+      return { type: 'media-clip', clip: clips[index], index };
+    }
+
+    const timelineClip = timelineClips.find(tc => tc.id === activeId);
+    if (timelineClip) {
+      return { type: 'timeline-clip', clip: clips[timelineClip.clipIndex], timelineClip };
+    }
+
+    return null;
+  }, [activeId, clips, timelineClips]);
+
+  const activeItem = getActiveItem();
+
+  const formatTime = (seconds) => {
+    if (!seconds && seconds !== 0) return '0:00';
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // Calculate grid columns based on collapsed states
+  const gridColumns = `${mediaLibraryCollapsed ? '0' : '200px'} 1fr ${transcriptCollapsed ? '0' : '250px'}`;
+
   return (
-    <div className="App">
-      {/* Compact Header with Title and Buttons */}
+    <DndContext sensors={sensors} onDragStart={handleDragStart} onDragMove={handleDragMove} onDragEnd={handleDragEnd}>
+    <div className="App" style={{ gridTemplateColumns: gridColumns }}>
+      {/* Header - Spans Full Width */}
       <header className="app-header">
         <h1>🎬 ClipForge</h1>
         <div className="header-controls">
@@ -496,9 +664,18 @@ function AppContent({ clips, setClips }) {
         </div>
       </header>
 
-      {/* Main Content Area */}
+      {/* Media Library Panel - Left */}
+      <MediaLibrary
+        clips={clips}
+        selectedClipIndex={selectedClipIndex}
+        onClipSelect={handleClipSelect}
+        onDeleteClip={handleDeleteClip}
+        collapsed={mediaLibraryCollapsed}
+        onToggleCollapse={() => setMediaLibraryCollapsed(!mediaLibraryCollapsed)}
+      />
+
+      {/* Main Content Area - Center */}
       <div className="main-content">
-        {/* Video Section - Takes up most space */}
         <div className="video-section">
           <VideoPlayer
             videoPath={playingClip?.path}
@@ -509,41 +686,66 @@ function AppContent({ clips, setClips }) {
             trimEnd={playingTrimEnd}
           />
         </div>
-
-        {/* Timeline Section - Fixed bottom area */}
-        <div className="timeline-section">
-          <div className="timeline-controls">
-            <button
-              className="btn-secondary"
-              onClick={() => {
-                if (confirm('Clear timeline? This will remove all clips from the timeline but keep them in the library.')) {
-                  clearTimeline();
-                }
-              }}
-              disabled={timelineClips.length === 0}
-            >
-              Clear Timeline
-            </button>
-            <button
-              className={`btn-secondary ${isTrimMode ? 'active' : ''}`}
-              disabled={timelineClips.length === 0}
-              title="Press 't' to start/complete trim at playhead position"
-            >
-              {trimStartTime !== null ? '✂️ Trimming... (press T)' : '✂️ Trim Mode (press T)'}
-            </button>
-          </div>
-          <Timeline
-            clips={clips}
-            onClipSelect={handleClipSelect}
-            selectedClipIndex={selectedClipIndex}
-            selectedTimelineClipId={selectedTimelineClipId}
-            onTimelineClipSelect={setSelectedTimelineClipId}
-            isTrimMode={isTrimMode}
-            trimStartTime={trimStartTime}
-          />
-        </div>
       </div>
+
+      {/* Transcript Panel - Right */}
+      <TranscriptPanel
+        segments={transcriptSegments}
+        currentTime={playingClipTime}
+        onSeek={seekPlayhead}
+        collapsed={transcriptCollapsed}
+        onToggleCollapse={() => setTranscriptCollapsed(!transcriptCollapsed)}
+        onTranscribe={handleTranscribeVideo}
+        isTranscribing={isTranscribing}
+        hasVideo={!!playingClip}
+      />
+
+      {/* Timeline Section - Bottom Spanning All */}
+      <div className="timeline-section">
+        <div className="timeline-controls">
+          <button
+            className="btn-secondary"
+            onClick={() => {
+              if (confirm('Clear timeline? This will remove all clips from the timeline but keep them in the library.')) {
+                clearTimeline();
+              }
+            }}
+            disabled={timelineClips.length === 0}
+          >
+            Clear Timeline
+          </button>
+          <button
+            className={`btn-secondary ${isTrimMode ? 'active' : ''}`}
+            disabled={timelineClips.length === 0}
+            title="Press 't' to start/complete trim at playhead position"
+          >
+            {trimStartTime !== null ? '✂️ Trimming... (press T)' : '✂️ Trim Mode (press T)'}
+          </button>
+        </div>
+        <Timeline
+          clips={clips}
+          onClipSelect={handleClipSelect}
+          selectedClipIndex={selectedClipIndex}
+          selectedTimelineClipId={selectedTimelineClipId}
+          onTimelineClipSelect={setSelectedTimelineClipId}
+          isTrimMode={isTrimMode}
+          trimStartTime={trimStartTime}
+        />
+      </div>
+
+      {/* Drag Overlay */}
+      <DragOverlay>
+        {activeItem && (
+          <div className="drag-overlay-preview">
+            <div className="clip-name">{activeItem.clip?.filename}</div>
+            {activeItem.clip?.duration && (
+              <div className="clip-meta">{formatTime(activeItem.clip.duration)}</div>
+            )}
+          </div>
+        )}
+      </DragOverlay>
     </div>
+    </DndContext>
   );
 }
 

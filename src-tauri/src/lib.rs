@@ -887,6 +887,234 @@ fn open_in_native_player(path: String) -> Result<(), String> {
     Ok(())
 }
 
+// ===== TRANSCRIPTION =====
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TranscriptSegment {
+    start: f64,
+    end: f64,
+    text: String,
+    confidence: f64,
+    #[serde(default)]
+    is_filler: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TranscriptionResult {
+    segments: Vec<TranscriptSegment>,
+    full_text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OpenAIWord {
+    word: String,
+    start: f64,
+    end: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OpenAISegment {
+    id: u32,
+    start: f64,
+    end: f64,
+    text: String,
+    #[serde(default)]
+    tokens: Vec<u32>,
+    temperature: f64,
+    avg_logprob: f64,
+    compression_ratio: f64,
+    no_speech_prob: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OpenAITranscriptionResponse {
+    task: String,
+    language: String,
+    duration: f64,
+    text: String,
+    segments: Vec<OpenAISegment>,
+    #[serde(default)]
+    words: Vec<OpenAIWord>,
+}
+
+// Extract audio from video file
+fn extract_audio(video_path: &str) -> Result<PathBuf, String> {
+    log::info!("Checking for audio stream in: {}", video_path);
+
+    // First, check if the video has an audio stream using ffprobe
+    let probe_output = Command::new("ffprobe")
+        .args(&[
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_streams",
+            "-select_streams", "a",  // Only select audio streams
+            video_path
+        ])
+        .output()
+        .map_err(|e| format!("Failed to execute ffprobe: {}", e))?;
+
+    let json_str = String::from_utf8_lossy(&probe_output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&json_str)
+        .map_err(|e| format!("Failed to parse ffprobe output: {}", e))?;
+
+    // Check if there are any audio streams
+    let audio_streams = json["streams"].as_array()
+        .map(|arr| arr.len())
+        .unwrap_or(0);
+
+    if audio_streams == 0 {
+        log::warn!("No audio stream found in video: {}", video_path);
+        return Err("This video has no audio track. Please select a video with audio to transcribe.".to_string());
+    }
+
+    log::info!("Found {} audio stream(s), extracting audio", audio_streams);
+
+    let temp_dir = std::env::temp_dir();
+    let audio_path = temp_dir.join("clipforge_audio.mp3");
+
+    let output = Command::new("ffmpeg")
+        .args(&[
+            "-i", video_path,
+            "-vn",  // No video
+            "-acodec", "libmp3lame",
+            "-ab", "192k",
+            "-ar", "44100",
+            "-af", "aresample=async=1:first_pts=0",  // Ensure audio starts at 0 and preserves duration
+            "-y",
+            audio_path.to_str().unwrap()
+        ])
+        .output()
+        .map_err(|e| format!("Failed to execute FFmpeg: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("FFmpeg audio extraction failed: {}", stderr));
+    }
+
+    // Verify extracted audio duration matches video
+    let audio_probe = Command::new("ffprobe")
+        .args(&[
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_format",
+            audio_path.to_str().unwrap()
+        ])
+        .output()
+        .map_err(|e| format!("Failed to probe audio: {}", e))?;
+
+    let audio_json_str = String::from_utf8_lossy(&audio_probe.stdout);
+    if let Ok(audio_json) = serde_json::from_str::<serde_json::Value>(&audio_json_str) {
+        if let Some(duration_str) = audio_json["format"]["duration"].as_str() {
+            if let Ok(audio_duration) = duration_str.parse::<f64>() {
+                log::info!("Extracted audio duration: {:.2}s", audio_duration);
+            }
+        }
+    }
+
+    log::info!("Audio extracted to: {:?}", audio_path);
+    Ok(audio_path)
+}
+
+// Transcribe audio using OpenAI Whisper API
+async fn transcribe_with_openai(audio_path: &PathBuf, api_key: &str) -> Result<TranscriptionResult, String> {
+    log::info!("Transcribing audio with OpenAI Whisper: {:?}", audio_path);
+
+    let client = reqwest::Client::new();
+
+    // Read the audio file
+    let file_data = std::fs::read(audio_path)
+        .map_err(|e| format!("Failed to read audio file: {}", e))?;
+
+    // Get filename for the multipart form
+    let filename = audio_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("audio.mp3");
+
+    // Create multipart form
+    let file_part = reqwest::multipart::Part::bytes(file_data)
+        .file_name(filename.to_string())
+        .mime_str("audio/mpeg")
+        .map_err(|e| format!("Failed to create file part: {}", e))?;
+
+    let form = reqwest::multipart::Form::new()
+        .part("file", file_part)
+        .text("model", "whisper-1")
+        .text("response_format", "verbose_json")
+        .text("timestamp_granularities[]", "segment");
+
+    // Send request to OpenAI
+    let response = client
+        .post("https://api.openai.com/v1/audio/transcriptions")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send transcription request: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(format!("OpenAI API request failed ({}): {}", status, error_text));
+    }
+
+    let openai_response: OpenAITranscriptionResponse = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse OpenAI response: {}", e))?;
+
+    log::info!("Transcription completed. Duration: {}s, Language: {}",
+               openai_response.duration, openai_response.language);
+
+    // Convert OpenAI segments to our format
+    let filler_words = vec!["um", "uh", "like", "so", "basically", "actually", "literally", "you know", "i mean"];
+
+    let segments: Vec<TranscriptSegment> = openai_response.segments
+        .iter()
+        .enumerate()
+        .map(|(i, seg)| {
+            log::info!("Segment {}: {:.2}s - {:.2}s: \"{}\"", i, seg.start, seg.end, seg.text.trim());
+
+            // Check if segment contains filler words
+            let is_filler = filler_words.iter().any(|filler| {
+                seg.text.to_lowercase().contains(filler)
+            });
+
+            TranscriptSegment {
+                start: seg.start,
+                end: seg.end,
+                text: seg.text.trim().to_string(),
+                confidence: (-seg.avg_logprob).min(1.0).max(0.0), // Convert logprob to confidence-like score
+                is_filler,
+            }
+        })
+        .collect();
+
+    log::info!("Processed {} segments", segments.len());
+
+    Ok(TranscriptionResult {
+        segments,
+        full_text: openai_response.text,
+    })
+}
+
+#[tauri::command]
+async fn transcribe_video(video_path: String, api_key: String) -> Result<TranscriptionResult, String> {
+    log::info!("Starting transcription for video: {}", video_path);
+
+    // Extract audio from video
+    let audio_path = extract_audio(&video_path)?;
+
+    // Transcribe with OpenAI Whisper
+    let result = transcribe_with_openai(&audio_path, &api_key).await?;
+
+    // Clean up temp audio file
+    let _ = std::fs::remove_file(audio_path);
+
+    log::info!("Transcription complete!");
+    Ok(result)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
@@ -901,8 +1129,8 @@ pub fn run() {
       start_recording,
       stop_recording,
       open_in_native_player,
-      list_audio_devices
-      // Native player commands removed - using video.js frontend player instead
+      list_audio_devices,
+      transcribe_video
     ])
     .register_uri_scheme_protocol("video", |_app, request| {
       use tauri::http::{Response, StatusCode};
