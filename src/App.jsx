@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import './App.css';
@@ -6,42 +6,31 @@ import VideoPlayer from './components/VideoPlayer';
 import Timeline from './components/Timeline';
 import TrimControls from './components/TrimControls';
 import RecordingControls from './components/RecordingControls';
+import { TimelineProvider, useTimeline } from './TimelineContext';
 
-function App() {
-  const [clips, setClips] = useState([]); // Library of imported clips
+function AppContent({ clips, setClips }) {
   const [selectedClipIndex, setSelectedClipIndex] = useState(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [isExporting, setIsExporting] = useState(false);
 
-  // Multi-clip timeline state
-  const [timelineClips, setTimelineClips] = useState([]); // Array of { clipIndex, startTime }
-  const [playheadTime, setPlayheadTime] = useState(0); // Position on full timeline
-  const [totalDuration, setTotalDuration] = useState(0); // Calculated from timelineClips
+  // Track last added clip to prevent rapid duplicates
+  const lastAddedRef = useRef({ clipIndex: null, timestamp: 0 });
+
+  // Get timeline state and functions from context
+  const {
+    timelineClips,
+    playheadTime,
+    totalDuration,
+    addClipToTimeline,
+    seekPlayhead,
+    getActiveClipAtTime,
+    clearTimeline
+  } = useTimeline();
 
   // Debug hook - access clips in console via window.__clips
   useEffect(() => {
     window.__clips = clips;
   }, [clips]);
-
-  // Calculate total timeline duration whenever timelineClips change
-  useEffect(() => {
-    if (timelineClips.length === 0) {
-      setTotalDuration(0);
-      return;
-    }
-
-    let total = 0;
-    timelineClips.forEach(tc => {
-      const clip = clips[tc.clipIndex];
-      if (clip && clip.duration) {
-        const clipDuration = clip.trimEnd && clip.trimStart
-          ? clip.trimEnd - clip.trimStart
-          : clip.duration;
-        total += clipDuration;
-      }
-    });
-    setTotalDuration(total);
-  }, [timelineClips, clips]);
 
   const handleImportVideo = async () => {
     try {
@@ -56,9 +45,11 @@ function App() {
 
       if (selected) {
         // Call Rust command to import video
+        console.log('[App] Importing video from path:', selected);
         const metadata = await invoke('import_video', { path: selected });
+        console.log('[App] Received metadata:', metadata);
         setClips([...clips, metadata]);
-        setSelectedClipIndex(clips.length); // Select the newly added clip
+        // Don't auto-select - let user drag to timeline
       }
     } catch (error) {
       console.error('Failed to import video:', error);
@@ -72,12 +63,14 @@ function App() {
       console.log('[App] Recording complete, importing file:', filePath);
 
       // Auto-import the saved file
+      console.log('[App] Importing recording from path:', filePath);
       const metadata = await invoke('import_video', { path: filePath });
+      console.log('[App] Recording metadata:', metadata);
       setClips([...clips, metadata]);
-      setSelectedClipIndex(clips.length);
+      // Don't auto-select - let user drag to timeline
 
       console.log('[App] Recording imported successfully');
-      alert('Recording complete! Your video has been added to the library. You can now edit it and export when ready.');
+      alert('Recording complete! Your video has been added to the media library. Drag it to the timeline to use it.');
     } catch (error) {
       console.error('[App] Failed to import recording:', error);
       alert(`Failed to import recording: ${error}`);
@@ -90,100 +83,100 @@ function App() {
   };
 
   const handleAddToTimeline = useCallback((clipIndex) => {
+    const now = Date.now();
+    const timeSinceLastAdd = now - lastAddedRef.current.timestamp;
+
+    console.log('[App] handleAddToTimeline called with clipIndex:', clipIndex);
+
+    // Prevent duplicate additions within 500ms
+    if (lastAddedRef.current.clipIndex === clipIndex && timeSinceLastAdd < 500) {
+      console.warn('[App] Duplicate add prevented - same clip within 500ms');
+      return;
+    }
+
     const clip = clips[clipIndex];
+    console.log('[App] Clip data:', clip);
+    console.log('[App] Clip has duration?', !!clip?.duration, 'Duration value:', clip?.duration);
+
     if (!clip || !clip.duration) {
+      console.error('[App] Clip missing or no duration. Clip:', clip);
       alert('Please wait for the clip to load before adding to timeline');
       return;
     }
 
-    // Calculate start time (end of last clip on timeline)
-    let startTime = 0;
-    if (timelineClips.length > 0) {
-      const lastTimelineClip = timelineClips[timelineClips.length - 1];
-      const lastClip = clips[lastTimelineClip.clipIndex];
-      const lastClipDuration = lastClip.trimEnd && lastClip.trimStart
-        ? lastClip.trimEnd - lastClip.trimStart
-        : lastClip.duration;
-      startTime = lastTimelineClip.startTime + lastClipDuration;
-    }
+    console.log('[App] Adding clip to timeline:', clip.filename);
 
-    setTimelineClips([...timelineClips, { clipIndex, startTime }]);
-  }, [clips, timelineClips]);
+    // Update last added tracker
+    lastAddedRef.current = { clipIndex, timestamp: now };
 
-  // Calculate which clip should be playing based on playheadTime
-  const getCurrentTimelineClip = useCallback(() => {
-    if (timelineClips.length === 0) return null;
-
-    for (let i = 0; i < timelineClips.length; i++) {
-      const tc = timelineClips[i];
-      const clip = clips[tc.clipIndex];
-      if (!clip || !clip.duration) continue;
-
-      const clipDuration = clip.trimEnd && clip.trimStart
-        ? clip.trimEnd - clip.trimStart
-        : clip.duration;
-      const clipEndTime = tc.startTime + clipDuration;
-
-      if (playheadTime >= tc.startTime && playheadTime < clipEndTime) {
-        // Calculate local time within the clip
-        const localTime = playheadTime - tc.startTime;
-        const actualTime = clip.trimStart ? clip.trimStart + localTime : localTime;
-
-        return {
-          timelineClipIndex: i,
-          clipIndex: tc.clipIndex,
-          clip,
-          localTime: actualTime,
-          clipStartTime: tc.startTime,
-          clipEndTime
-        };
-      }
-    }
-
-    return null;
-  }, [timelineClips, clips, playheadTime]);
+    // Add to timeline (context will calculate position)
+    // Pass the clips array so context has fresh data
+    addClipToTimeline(clipIndex, null, clips);
+  }, [clips, addClipToTimeline]);
 
   const handleVideoLoaded = useCallback((metadata) => {
-    if (selectedClipIndex !== null) {
+    // When a video loads, update the clip metadata ONLY if it's missing
+    // Use the playing clip from timeline if available
+    const clipInfo = timelineClips.length > 0 ? getActiveClipAtTime(playheadTime) : null;
+    const clipIndexToUpdate = clipInfo ? clipInfo.timelineClip.clipIndex : selectedClipIndex;
+
+    if (clipIndexToUpdate !== null && clipIndexToUpdate !== undefined) {
       setClips(prevClips => {
-        const updatedClips = [...prevClips];
-        updatedClips[selectedClipIndex] = {
-          ...updatedClips[selectedClipIndex],
-          duration: metadata.duration,
-          width: metadata.width,
-          height: metadata.height
-        };
-        return updatedClips;
+        const existingClip = prevClips[clipIndexToUpdate];
+
+        // Only update if metadata is actually missing (prevents infinite loop)
+        if (existingClip && !existingClip.duration) {
+          const updatedClips = [...prevClips];
+          updatedClips[clipIndexToUpdate] = {
+            ...existingClip,
+            duration: metadata.duration,
+            width: metadata.width,
+            height: metadata.height
+          };
+          console.log('[App] Updated clip metadata from video player for clip', clipIndexToUpdate);
+          return updatedClips;
+        }
+
+        // No change needed
+        return prevClips;
       });
     }
-  }, [selectedClipIndex]);
+  }, [selectedClipIndex, timelineClips, getActiveClipAtTime, playheadTime]);
 
   // Handle time update from video player - update playhead position on timeline
   const handleTimelineTimeUpdate = useCallback((videoTime) => {
-    const currentClipInfo = getCurrentTimelineClip();
+    const currentClipInfo = getActiveClipAtTime(playheadTime);
     if (!currentClipInfo) return;
 
     // Calculate timeline position based on video time
     const clip = currentClipInfo.clip;
     const trimOffset = clip.trimStart || 0;
-    const timelinePosition = currentClipInfo.clipStartTime + (videoTime - trimOffset);
+    const clipStartTime = currentClipInfo.timelineClip.startTime;
+    const timelinePosition = clipStartTime + (videoTime - trimOffset);
 
-    setPlayheadTime(timelinePosition);
+    seekPlayhead(timelinePosition);
 
     // Check if we need to advance to next clip
-    if (timelinePosition >= currentClipInfo.clipEndTime - 0.1) {
-      const nextClipIndex = currentClipInfo.timelineClipIndex + 1;
+    const clipDuration = (clip.trimEnd != null && clip.trimStart != null)
+      ? clip.trimEnd - clip.trimStart
+      : clip.duration;
+    const clipEndTime = clipStartTime + clipDuration;
+
+    if (timelinePosition >= clipEndTime - 0.1) {
+      // Find next clip in timeline
+      const currentIndex = timelineClips.findIndex(tc => tc.id === currentClipInfo.timelineClip.id);
+      const nextClipIndex = currentIndex + 1;
       if (nextClipIndex < timelineClips.length) {
         // Move to next clip
         const nextTimelineClip = timelineClips[nextClipIndex];
-        setPlayheadTime(nextTimelineClip.startTime);
+        seekPlayhead(nextTimelineClip.startTime);
         setSelectedClipIndex(nextTimelineClip.clipIndex);
       } else {
         // End of timeline
-        setPlayheadTime(totalDuration);
+        seekPlayhead(totalDuration);
       }
     }
-  }, [getCurrentTimelineClip, timelineClips, totalDuration]);
+  }, [getActiveClipAtTime, playheadTime, seekPlayhead, timelineClips, totalDuration, setSelectedClipIndex]);
 
   const handleSetTrimStart = useCallback(() => {
     if (selectedClipIndex !== null) {
@@ -312,9 +305,62 @@ function App() {
   const selectedClip = selectedClipIndex !== null ? clips[selectedClipIndex] : null;
 
   // Get the clip that should be playing based on timeline position
-  const currentTimelineClipInfo = getCurrentTimelineClip();
-  const playingClip = currentTimelineClipInfo ? currentTimelineClipInfo.clip : selectedClip;
-  const playingClipTime = currentTimelineClipInfo ? currentTimelineClipInfo.localTime : currentTime;
+  // ONLY play from timeline, not from library selection
+  const currentTimelineClipInfo = getActiveClipAtTime(playheadTime);
+  console.log('[App] getActiveClipAtTime returned:', currentTimelineClipInfo);
+  console.log('[App] playheadTime:', playheadTime, 'timelineClips.length:', timelineClips.length);
+
+  const playingClip = currentTimelineClipInfo ? currentTimelineClipInfo.clip : null;
+  const playingClipTime = currentTimelineClipInfo ? currentTimelineClipInfo.offsetInClip : 0;
+
+  console.log('[App] VideoPlayer will receive:');
+  console.log('[App]   videoPath:', playingClip?.path);
+  console.log('[App]   currentTime:', playingClipTime);
+
+  // Debug video playback
+  if (timelineClips.length > 0 && !playingClip) {
+    console.warn('[App] Timeline has clips but no active clip found!');
+    console.warn('[App] playheadTime:', playheadTime);
+    console.warn('[App] timelineClips:', timelineClips);
+    console.warn('[App] First clip starts at:', timelineClips[0]?.startTime);
+  }
+
+  // When playhead changes (from drag or click), update video player and selected clip
+  useEffect(() => {
+    if (timelineClips.length > 0 && playheadTime >= 0) {
+      const clipInfo = getActiveClipAtTime(playheadTime);
+      if (clipInfo) {
+        // Switch to the clip that should be playing at this time
+        setSelectedClipIndex(clipInfo.timelineClip.clipIndex);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playheadTime, timelineClips]); // getActiveClipAtTime is stable (useCallback)
+
+  // Auto-load first clip when timeline clips are added
+  useEffect(() => {
+    console.log('[App] Timeline clips changed, count:', timelineClips.length);
+
+    if (timelineClips.length === 0) {
+      // Timeline cleared - reset playhead to 0
+      if (playheadTime !== 0) {
+        seekPlayhead(0);
+      }
+      return;
+    }
+
+    if (timelineClips.length > 0 && playheadTime === 0) {
+      // Only auto-load if playhead is at 0 (prevents re-triggering)
+      const firstClip = timelineClips[0];
+      console.log('[App] Auto-loading timeline - first clip at:', firstClip.startTime);
+
+      if (firstClip) {
+        // Seek to just past the start to trigger video load
+        const seekPosition = firstClip.startTime + 0.01;
+        seekPlayhead(seekPosition);
+      }
+    }
+  }, [timelineClips.length, seekPlayhead, playheadTime]); // Proper dependencies
 
   return (
     <div className="App">
@@ -325,6 +371,17 @@ function App() {
           <RecordingControls onRecordingComplete={handleRecordingComplete} />
           <button className="btn-primary" onClick={handleImportVideo}>
             Import Video
+          </button>
+          <button
+            className="btn-secondary"
+            onClick={() => {
+              if (confirm('Clear timeline? This will remove all clips from the timeline but keep them in the library.')) {
+                clearTimeline();
+              }
+            }}
+            disabled={timelineClips.length === 0}
+          >
+            Clear Timeline
           </button>
           <button
             className="btn-secondary"
@@ -341,9 +398,9 @@ function App() {
         {/* Video Section - Takes up most space */}
         <div className="video-section">
           <VideoPlayer
-            videoPath={playingClip?.path || selectedClip?.path}
-            onTimeUpdate={timelineClips.length > 0 ? handleTimelineTimeUpdate : setCurrentTime}
-            currentTime={timelineClips.length > 0 ? playingClipTime : currentTime}
+            videoPath={playingClip?.path}
+            onTimeUpdate={handleTimelineTimeUpdate}
+            currentTime={playingClipTime}
             onVideoLoaded={handleVideoLoaded}
             trimStart={playingClip?.trimStart ?? null}
             trimEnd={playingClip?.trimEnd ?? null}
@@ -365,16 +422,23 @@ function App() {
           )}
           <Timeline
             clips={clips}
-            timelineClips={timelineClips}
             onClipSelect={handleClipSelect}
             onAddToTimeline={handleAddToTimeline}
             selectedClipIndex={selectedClipIndex}
-            playheadTime={playheadTime}
-            totalDuration={totalDuration}
           />
         </div>
       </div>
     </div>
+  );
+}
+
+function App() {
+  const [clips, setClips] = useState([]);
+
+  return (
+    <TimelineProvider clips={clips}>
+      <AppContent clips={clips} setClips={setClips} />
+    </TimelineProvider>
   );
 }
 

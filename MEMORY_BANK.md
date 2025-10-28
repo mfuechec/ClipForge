@@ -249,6 +249,34 @@ ClipForge/
   ```
 - **Location**: `src-tauri/src/lib.rs` in `start_recording()` function
 
+### ⚠️ Problem 8: Timeline Layout Overflow (RESOLVED)
+- **Status**: ✅ RESOLVED - Fixed responsive layout
+- **Date**: October 27, 2025
+- **Symptoms**: Media library and timeline section required scrolling, text clipping in clip cards
+- **Root Cause**:
+  - Timeline section height (240px) insufficient for content
+  - Section headers taking up unnecessary space
+  - Media library clip cards not accounting for padding/borders
+- **Fix**:
+  1. Removed section headers (MEDIA LIBRARY/TIMELINE titles) - `Timeline.jsx:28-31, 65-68`
+  2. Increased timeline section height from 240px to 260px - `App.css:66`
+  3. Set media library to 100px fixed height - `Timeline.css:26-27`
+  4. Optimized spacing:
+     - Timeline padding: 12px vertical - `Timeline.css:4`
+     - Gap between sections: 10px - `Timeline.css:8`
+     - Trim controls padding: 8px vertical - `TrimControls.css:3`
+  5. Made trim controls more compact:
+     - Button padding: 6px/12px - `TrimControls.css:22`
+     - Badge padding: 4px/8px - `TrimControls.css:65`
+     - Font sizes reduced to 12px/11px
+  6. Library clip cards use `height: fit-content` - `Timeline.css:63`
+- **Result**: All UI elements fit on screen without vertical scrolling
+- **Locations**:
+  - `src/App.css:66` (timeline section height)
+  - `src/components/Timeline.css:2-31` (container and library styling)
+  - `src/components/Timeline.jsx:28, 65` (removed headers)
+  - `src/components/TrimControls.css:3, 13, 22, 59, 65` (compact controls)
+
 ## State Management Architecture
 
 ### App.jsx State

@@ -10,71 +10,89 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
   const [playbackRate, setPlaybackRate] = useState(1.0);
   const [isPlaying, setIsPlaying] = useState(false);
 
-  // Initialize video.js player
-  useEffect(() => {
-    if (!videoRef.current || !videoPath) return;
+  // Store callbacks in refs to avoid recreating player when callbacks change
+  const onTimeUpdateRef = useRef(onTimeUpdate);
+  const onVideoLoadedRef = useRef(onVideoLoaded);
 
-    // Dispose of existing player
-    if (playerRef.current) {
-      playerRef.current.dispose();
-      playerRef.current = null;
+  // Update refs when callbacks change
+  useEffect(() => {
+    onTimeUpdateRef.current = onTimeUpdate;
+    onVideoLoadedRef.current = onVideoLoaded;
+  }, [onTimeUpdate, onVideoLoaded]);
+
+  // Initialize player when video element appears, update source when path changes
+  useEffect(() => {
+    console.log('[VideoPlayer] Effect running - videoPath:', videoPath, 'element exists:', !!videoRef.current);
+
+    // Need both element and path to proceed
+    if (!videoRef.current || !videoPath) {
+      console.log('[VideoPlayer] Skipping - missing element or path');
+      return;
     }
 
-    // Initialize video.js with optimized settings
-    const player = videojs(videoRef.current, {
-      controls: true,
-      autoplay: false,
-      preload: 'metadata',
-      fluid: false,
-      responsive: true,
-      playbackRates: [0.5, 1, 1.5, 2, 3],
-      html5: {
-        vhs: {
-          overrideNative: true
-        },
-        nativeVideoTracks: false,
-        nativeAudioTracks: false,
-        nativeTextTracks: false
-      }
-    });
+    // If player doesn't exist yet, create it
+    if (!playerRef.current) {
+      console.log('[VideoPlayer] Creating new player');
+      const player = videojs(videoRef.current, {
+        controls: true,
+        autoplay: false,
+        preload: 'metadata',
+        fluid: false,
+        responsive: true,
+        playbackRates: [0.5, 1, 1.5, 2, 3],
+        html5: {
+          vhs: {
+            overrideNative: true
+          },
+          nativeVideoTracks: false,
+          nativeAudioTracks: false,
+          nativeTextTracks: false
+        }
+      });
 
-    playerRef.current = player;
+      playerRef.current = player;
 
-    // Set video source using Tauri's custom protocol
-    player.src({
+      // Handle loaded metadata - use ref to get latest callback
+      player.on('loadedmetadata', () => {
+        if (onVideoLoadedRef.current) {
+          const duration = player.duration();
+          const videoWidth = player.videoWidth();
+          const videoHeight = player.videoHeight();
+          onVideoLoadedRef.current({ duration, width: videoWidth, height: videoHeight });
+        }
+      });
+
+      // Handle time updates - use ref to get latest callback
+      player.on('timeupdate', () => {
+        if (onTimeUpdateRef.current) {
+          onTimeUpdateRef.current(player.currentTime());
+        }
+      });
+
+      // Handle play/pause state
+      player.on('play', () => setIsPlaying(true));
+      player.on('pause', () => setIsPlaying(false));
+
+      console.log('[VideoPlayer] Player created and event listeners attached');
+    }
+
+    // Update source (whether player is new or existing)
+    console.log('[VideoPlayer] Updating source to:', videoPath);
+    playerRef.current.src({
       src: convertFileSrc(videoPath),
       type: 'video/mp4'
     });
 
-    // Handle loaded metadata
-    player.on('loadedmetadata', () => {
-      if (onVideoLoaded) {
-        const duration = player.duration();
-        const videoWidth = player.videoWidth();
-        const videoHeight = player.videoHeight();
-        onVideoLoaded({ duration, width: videoWidth, height: videoHeight });
-      }
-    });
-
-    // Handle time updates
-    player.on('timeupdate', () => {
-      if (onTimeUpdate) {
-        onTimeUpdate(player.currentTime());
-      }
-    });
-
-    // Handle play/pause state
-    player.on('play', () => setIsPlaying(true));
-    player.on('pause', () => setIsPlaying(false));
-
-    // Cleanup on unmount
+    // Cleanup ONLY on unmount (not on videoPath change)
     return () => {
-      if (playerRef.current) {
+      // Only dispose if we're actually unmounting (videoPath becomes null/undefined)
+      if (!videoPath && playerRef.current) {
+        console.log('[VideoPlayer] Disposing player on unmount');
         playerRef.current.dispose();
         playerRef.current = null;
       }
     };
-  }, [videoPath, onVideoLoaded, onTimeUpdate]);
+  }, [videoPath]); // Only re-run when videoPath changes
 
   // Handle external currentTime changes
   useEffect(() => {

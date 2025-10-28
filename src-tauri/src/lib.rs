@@ -20,9 +20,12 @@ pub struct VideoMetadata {
 
 #[tauri::command]
 fn import_video(path: String) -> Result<VideoMetadata, String> {
+    log::info!("import_video called with path: {}", path);
+
     let path_buf = PathBuf::from(&path);
 
     if !path_buf.exists() {
+        log::error!("File does not exist: {}", path);
         return Err("File does not exist".to_string());
     }
 
@@ -32,15 +35,99 @@ fn import_video(path: String) -> Result<VideoMetadata, String> {
         .unwrap_or("unknown")
         .to_string();
 
-    // For MVP, return basic metadata without FFmpeg
-    // We'll add FFmpeg later for proper duration/resolution
-    Ok(VideoMetadata {
+    log::info!("Probing video metadata for: {}", filename);
+
+    // Use FFmpeg to probe video metadata
+    let (duration, width, height) = match probe_video_metadata(&path) {
+        Ok(metadata) => {
+            log::info!("Successfully probed metadata - Duration: {}s, Resolution: {}x{}",
+                      metadata.0, metadata.1, metadata.2);
+            metadata
+        },
+        Err(e) => {
+            log::error!("Failed to probe video metadata: {}", e);
+            return Err(e);
+        }
+    };
+
+    let result = VideoMetadata {
         path: path.clone(),
         filename,
-        duration: None,
-        width: None,
-        height: None,
-    })
+        duration: Some(duration),
+        width: Some(width),
+        height: Some(height),
+    };
+
+    log::info!("Returning metadata: {:?}", result);
+    Ok(result)
+}
+
+// Helper function to probe video metadata using ffprobe
+fn probe_video_metadata(path: &str) -> Result<(f64, u32, u32), String> {
+    log::info!("Running ffprobe on: {}", path);
+
+    let output = Command::new("ffprobe")
+        .args(&[
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_format",
+            "-show_streams",
+            path
+        ])
+        .output()
+        .map_err(|e| {
+            log::error!("Failed to execute ffprobe: {}", e);
+            format!("Failed to run ffprobe. Make sure FFmpeg is installed. Error: {}", e)
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::error!("ffprobe command failed. stderr: {}", stderr);
+        return Err(format!("ffprobe failed to read video metadata: {}", stderr));
+    }
+
+    let json_str = String::from_utf8_lossy(&output.stdout);
+    log::debug!("ffprobe JSON output: {}", json_str);
+
+    let json: serde_json::Value = serde_json::from_str(&json_str)
+        .map_err(|e| {
+            log::error!("Failed to parse ffprobe JSON: {}", e);
+            format!("Failed to parse ffprobe output: {}", e)
+        })?;
+
+    // Extract duration from format section
+    let duration = json["format"]["duration"]
+        .as_str()
+        .and_then(|s| {
+            log::debug!("Parsing duration string: {}", s);
+            s.parse::<f64>().ok()
+        })
+        .unwrap_or(0.0);
+
+    log::info!("Extracted duration: {} seconds", duration);
+
+    // Extract width and height from first video stream
+    let streams = json["streams"].as_array()
+        .ok_or_else(|| {
+            log::error!("No streams array in ffprobe output");
+            "No streams found in video".to_string()
+        })?;
+
+    log::info!("Found {} streams", streams.len());
+
+    let video_stream = streams.iter()
+        .find(|s| s["codec_type"] == "video")
+        .ok_or_else(|| {
+            log::error!("No video stream found in {} streams", streams.len());
+            "No video stream found".to_string()
+        })?;
+
+    let width = video_stream["width"].as_u64().unwrap_or(1920) as u32;
+    let height = video_stream["height"].as_u64().unwrap_or(1080) as u32;
+
+    log::info!("Extracted resolution: {}x{}", width, height);
+
+    Ok((duration, width, height))
 }
 
 #[derive(Debug, Serialize, Deserialize)]

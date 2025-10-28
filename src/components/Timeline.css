@@ -1,29 +1,16 @@
 /* Timeline Container */
 .timeline {
   flex: 1;
-  padding: 16px 24px;
-  overflow-y: auto;
-  overflow-x: hidden;
+  padding: 12px 24px;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 10px;
 }
 
 /* Section Headers */
 .section-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-
-.section-header h3 {
-  font-size: 14px;
-  font-weight: 600;
-  color: #fff;
-  margin: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+  display: none;
 }
 
 .clip-count,
@@ -36,36 +23,44 @@
 /* ========== MEDIA LIBRARY ========== */
 .media-library {
   flex-shrink: 0;
+  min-height: 100px;
+  max-height: 100px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .library-empty {
-  padding: 24px;
+  padding: 12px;
   text-align: center;
   color: #666;
-  font-size: 13px;
+  font-size: 12px;
   background: #1a1a1a;
-  border-radius: 6px;
+  border-radius: 4px;
 }
 
 .library-clips {
   display: flex;
-  gap: 12px;
+  gap: 8px;
   overflow-x: auto;
-  padding-bottom: 8px;
+  overflow-y: hidden;
+  padding-bottom: 4px;
+  flex: 1;
 }
 
 .library-clip {
-  min-width: 200px;
-  max-width: 250px;
-  padding: 12px;
+  min-width: 180px;
+  max-width: 220px;
+  padding: 10px;
   background: #2a2a2a;
-  border-radius: 6px;
+  border-radius: 4px;
   border: 2px solid transparent;
   cursor: pointer;
   transition: all 0.2s;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
+  height: fit-content;
 }
 
 .library-clip:hover {
@@ -123,29 +118,34 @@
 /* ========== TIMELINE TRACK ========== */
 .timeline-track-section {
   flex: 1;
-  min-height: 150px;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .timeline-empty {
-  padding: 40px;
+  padding: 20px;
   text-align: center;
   color: #666;
-  font-size: 13px;
+  font-size: 12px;
   background: #1a1a1a;
-  border-radius: 6px;
+  border-radius: 4px;
 }
 
 .timeline-track-container {
   background: #1a1a1a;
   border-radius: 6px;
-  padding: 16px;
+  padding: 12px;
   overflow-x: auto;
   overflow-y: hidden;
+  flex: 1;
+  min-height: 0;
 }
 
 .timeline-track {
   position: relative;
-  height: 80px;
+  height: 70px;
   min-width: 100%;
   background: #0f0f0f;
   border-radius: 4px;

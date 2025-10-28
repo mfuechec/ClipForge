@@ -1,6 +1,6 @@
 /* Trim Controls Container */
 .trim-controls {
-  padding: 12px 24px;
+  padding: 8px 24px;
   border-bottom: 1px solid #2a2a2a;
   background: #1a1a1a;
   flex-shrink: 0;
@@ -9,8 +9,8 @@
 .trim-controls-inner {
   display: flex;
   align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
+  gap: 8px;
+  flex-wrap: nowrap;
 }
 
 /* Trim Buttons */
@@ -18,10 +18,10 @@
   background: #2a2a2a;
   color: #fff;
   border: 1px solid #3a3a3a;
-  border-radius: 6px;
-  padding: 8px 16px;
+  border-radius: 4px;
+  padding: 6px 12px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   transition: all 0.2s;
   white-space: nowrap;
@@ -56,18 +56,18 @@
 .trim-info {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   margin-left: auto;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .trim-badge {
-  padding: 6px 12px;
+  padding: 4px 8px;
   background: #2a2a2a;
   border: 1px solid #3a3a3a;
-  border-radius: 4px;
+  border-radius: 3px;
   font-family: 'Courier New', monospace;
-  font-size: 12px;
+  font-size: 11px;
   color: #4a9eff;
   font-weight: 500;
   white-space: nowrap;
