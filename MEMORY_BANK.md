@@ -78,17 +78,28 @@ ClipForge/
 - **Visual Indicator**: Blue border on selected clip
 - **Location**: `src/components/Timeline.jsx`
 
-### 4. Trim Functionality
-- **Set In Point**: Button to mark trim start at current playback time
-- **Set Out Point**: Button to mark trim end at current playback time
-- **Clear Trim**: Remove all trim markers
+### 4. Trim Functionality (Keyboard-Driven with Per-Instance Trims)
+- **Keyboard Shortcut**: Press 'T' key to start/complete trim at playhead position
+- **Smart Trim Detection**:
+  - **First 10% of clip**: Trims from the start (removes beginning)
+  - **Last 10% of clip**: Trims from the end (removes ending)
+  - **Middle 80% of clip**: Splits clip into two parts (removes middle section)
+- **Per-Instance Trims**: Each timeline clip instance has independent trim points
+  - Source clips in media library remain untrimmed
+  - Same source can be used multiple times with different trims
+  - Trim points stored in `timelineClip.trimStart` and `timelineClip.trimEnd`
 - **Visual Indicators**:
-  - Blue `[` and `]` markers on timeline showing in/out points
-  - Blue highlighted region showing selected portion
-  - Trim duration display in TrimControls component
-  - "✂️ Trimmed: X.XXs" badge in Timeline
-- **State Storage**: trimStart and trimEnd stored per clip
-- **Location**: `src/components/TrimControls.jsx`, `src/components/VideoPlayer.jsx:75-109`
+  - Red pulsing overlay shows trim selection region during selection
+  - Duration label displays amount to be removed
+  - Button shows "✂️ Trimming... (press T)" when active
+- **Clip Splitting**: Middle-section trims create two separate clips on timeline
+- **State Storage**:
+  - Timeline clips: `{id, clipIndex, startTime, trimStart, trimEnd}`
+  - Source clips: No trim properties (always show full duration)
+- **Location**:
+  - Trim logic: `src/App.jsx:196-299` (keyboard handler)
+  - Context: `src/TimelineContext.jsx:204-280` (updateTimelineClipTrim, splitTimelineClip)
+  - Video enforcement: `src/components/VideoPlayer.jsx:79-193` (trim boundary checks)
 
 ### 5. Video Export (FFmpeg Integration)
 - **Backend**: Rust command spawns FFmpeg CLI process
@@ -249,7 +260,34 @@ ClipForge/
   ```
 - **Location**: `src-tauri/src/lib.rs` in `start_recording()` function
 
-### ⚠️ Problem 8: Timeline Layout Overflow (RESOLVED)
+### ⚠️ Problem 8: Playhead Drag Performance After Trimming (RESOLVED)
+- **Status**: ✅ RESOLVED - Added threshold checks
+- **Date**: October 28, 2025
+- **Symptoms**: Playhead would jump to end of clip after trimming, drag movement felt strange
+- **Root Cause**:
+  - VideoPlayer's trim boundary enforcement was too aggressive
+  - Feedback loop between VideoPlayer time updates and timeline position updates
+  - No threshold checks caused micro-adjustments during dragging
+- **Fix**:
+  1. **VideoPlayer threshold** - Only adjust position if >0.2 seconds outside boundaries:
+     ```javascript
+     // Only adjust if significantly outside boundaries
+     if (trimStart != null && currentTime < trimStart - 0.2) {
+       player.currentTime(trimStart);
+     }
+     ```
+  2. **Timeline update threshold** - Only update if >0.05 seconds changed:
+     ```javascript
+     // Avoid feedback loops
+     if (Math.abs(timelinePosition - playheadTime) > 0.05) {
+       seekPlayhead(timelinePosition);
+     }
+     ```
+- **Location**:
+  - `src/components/VideoPlayer.jsx:176-193` (trim boundary check)
+  - `src/App.jsx:131-134` (timeline update threshold)
+
+### ⚠️ Problem 9: Timeline Layout Overflow (RESOLVED)
 - **Status**: ✅ RESOLVED - Fixed responsive layout
 - **Date**: October 27, 2025
 - **Symptoms**: Media library and timeline section required scrolling, text clipping in clip cards
@@ -342,22 +380,41 @@ ClipForge/
 
 ### App.jsx State
 ```javascript
-const [clips, setClips] = useState([]);           // All imported clips
+const [clips, setClips] = useState([]);           // Source clips (no trim data)
 const [selectedClipIndex, setSelectedClipIndex] = useState(null);  // Currently selected clip
+const [selectedTimelineClipId, setSelectedTimelineClipId] = useState(null);  // Selected timeline instance
 const [currentTime, setCurrentTime] = useState(0);  // Video playback time
 const [isExporting, setIsExporting] = useState(false);  // Export in progress
+const [isTrimMode, setIsTrimMode] = useState(false);  // Trim mode active
+const [trimStartTime, setTrimStartTime] = useState(null);  // Trim selection start
 ```
 
-### Clip Object Structure
+### TimelineContext State
+```javascript
+const [timelineClips, setTimelineClips] = useState([]);  // Timeline instances
+const [playheadTime, setPlayheadTime] = useState(0);     // Playhead position
+```
+
+### Source Clip Object Structure (Media Library)
 ```javascript
 {
   path: "/path/to/video.mov",          // Full file path
   filename: "video.mov",               // Display name
   duration: 12.35,                     // Duration in seconds
   width: 1920,                         // Video width
-  height: 1080,                        // Video height
-  trimStart: 2.5,                      // Trim start time (optional)
-  trimEnd: 8.3                         // Trim end time (optional)
+  height: 1080                         // Video height
+  // NO trim properties - always shows full clip
+}
+```
+
+### Timeline Clip Object Structure (Timeline Instances)
+```javascript
+{
+  id: "timeline-clip-1730123456-0.123",  // Unique instance ID
+  clipIndex: 0,                           // Reference to source clip
+  startTime: 0.0,                         // Position on timeline
+  trimStart: 2.5,                         // Trim start (in source clip time)
+  trimEnd: 8.3                            // Trim end (in source clip time)
 }
 ```
 
@@ -500,19 +557,22 @@ npm run tauri:build
 ## Important Code Locations
 
 ### Critical Functions
-1. **handleImportVideo**: `src/App.jsx:21-39` - Import video file via dialog
-2. **handleVideoLoaded**: `src/App.jsx:42-65` - Update clip metadata from video element
-3. **handleSetTrimStart**: `src/App.jsx:68-80` - Set trim start point
-4. **handleSetTrimEnd**: `src/App.jsx:82-94` - Set trim end point
-5. **handleExportVideo**: `src/App.jsx:118-168` - Export video with FFmpeg
-6. **export_video** (Rust): `src-tauri/src/lib.rs:47-91` - FFmpeg command execution
-7. **list_audio_devices** (Rust): `src-tauri/src/lib.rs:259-316` - Enumerate AVFoundation audio devices
-8. **start_recording** (Rust): `src-tauri/src/lib.rs:237-340` - Start screen recording with audio
-9. **stop_recording** (Rust): `src-tauri/src/lib.rs:342-380` - Stop recording with SIGINT (handles exit code 255)
-10. **handleStartRecording**: `src/components/RecordingControls.jsx:47-85` - Frontend recording start with audio settings
-11. **handleStopRecording**: `src/components/RecordingControls.jsx:88-109` - Frontend recording stop
-12. **AudioSettingsModal**: `src/components/AudioSettingsModal.jsx` - Audio device selection and configuration
-13. **loadAudioDevices**: `src/components/AudioSettingsModal.jsx:23-41` - Load and filter audio devices
+1. **handleImportVideo**: `src/App.jsx:35-56` - Import video file via dialog
+2. **handleVideoLoaded**: `src/App.jsx:88-117` - Update clip metadata from video element
+3. **Keyboard Handler ('T' key)**: `src/App.jsx:196-325` - Trim mode toggle and trim application
+4. **handleTimelineTimeUpdate**: `src/App.jsx:119-156` - Sync video player with timeline playhead
+5. **handleExportVideo**: `src/App.jsx:327-401` - Export video with FFmpeg (uses timeline trim points)
+6. **updateTimelineClipTrim**: `src/TimelineContext.jsx:204-223` - Update trim points for timeline instance
+7. **splitTimelineClip**: `src/TimelineContext.jsx:225-280` - Split clip by removing middle section
+8. **getActiveClipAtTime**: `src/TimelineContext.jsx:161-202` - Find clip at playhead position
+9. **export_video** (Rust): `src-tauri/src/lib.rs:47-91` - FFmpeg command execution
+10. **list_audio_devices** (Rust): `src-tauri/src/lib.rs:259-316` - Enumerate AVFoundation audio devices
+11. **start_recording** (Rust): `src-tauri/src/lib.rs:237-340` - Start screen recording with audio
+12. **stop_recording** (Rust): `src-tauri/src/lib.rs:342-380` - Stop recording with SIGINT (handles exit code 255)
+13. **handleStartRecording**: `src/components/RecordingControls.jsx:47-85` - Frontend recording start with audio settings
+14. **handleStopRecording**: `src/components/RecordingControls.jsx:88-109` - Frontend recording stop
+15. **AudioSettingsModal**: `src/components/AudioSettingsModal.jsx` - Audio device selection and configuration
+16. **loadAudioDevices**: `src/components/AudioSettingsModal.jsx:23-41` - Load and filter audio devices
 
 ### State Update Patterns
 - Always use `useCallback` for handlers passed to child components

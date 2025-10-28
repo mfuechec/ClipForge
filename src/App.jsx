@@ -4,7 +4,6 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 import './App.css';
 import VideoPlayer from './components/VideoPlayer';
 import Timeline from './components/Timeline';
-import TrimControls from './components/TrimControls';
 import RecordingControls from './components/RecordingControls';
 import { TimelineProvider, useTimeline } from './TimelineContext';
 
@@ -13,6 +12,8 @@ function AppContent({ clips, setClips }) {
   const [selectedTimelineClipId, setSelectedTimelineClipId] = useState(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [isExporting, setIsExporting] = useState(false);
+  const [isTrimMode, setIsTrimMode] = useState(false);
+  const [trimStartTime, setTrimStartTime] = useState(null); // Track where trim selection started
 
   // Get timeline state and functions from context
   const {
@@ -21,6 +22,8 @@ function AppContent({ clips, setClips }) {
     totalDuration,
     addClipToTimeline,
     removeClipFromTimeline,
+    updateTimelineClipTrim,
+    splitTimelineClip,
     seekPlayhead,
     getActiveClipAtTime,
     clearTimeline,
@@ -120,21 +123,25 @@ function AppContent({ clips, setClips }) {
 
     // Calculate timeline position based on video time
     const clip = currentClipInfo.clip;
-    const trimOffset = clip.trimStart || 0;
-    const clipStartTime = currentClipInfo.timelineClip.startTime;
+    const timelineClip = currentClipInfo.timelineClip;
+    const trimOffset = timelineClip.trimStart || 0;
+    const clipStartTime = timelineClip.startTime;
     const timelinePosition = clipStartTime + (videoTime - trimOffset);
 
-    seekPlayhead(timelinePosition);
+    // Only update if the position has actually changed (avoid feedback loops)
+    if (Math.abs(timelinePosition - playheadTime) > 0.05) {
+      seekPlayhead(timelinePosition);
+    }
 
     // Check if we need to advance to next clip
-    const clipDuration = (clip.trimEnd != null && clip.trimStart != null)
-      ? clip.trimEnd - clip.trimStart
+    const clipDuration = (timelineClip.trimEnd != null && timelineClip.trimStart != null)
+      ? timelineClip.trimEnd - timelineClip.trimStart
       : clip.duration;
     const clipEndTime = clipStartTime + clipDuration;
 
     if (timelinePosition >= clipEndTime - 0.1) {
       // Find next clip in timeline
-      const currentIndex = timelineClips.findIndex(tc => tc.id === currentClipInfo.timelineClip.id);
+      const currentIndex = timelineClips.findIndex(tc => tc.id === timelineClip.id);
       const nextClipIndex = currentIndex + 1;
       if (nextClipIndex < timelineClips.length) {
         // Move to next clip
@@ -148,45 +155,6 @@ function AppContent({ clips, setClips }) {
     }
   }, [getActiveClipAtTime, playheadTime, seekPlayhead, timelineClips, totalDuration, setSelectedClipIndex]);
 
-  const handleSetTrimStart = useCallback(() => {
-    if (selectedClipIndex !== null) {
-      setClips(prevClips => {
-        const updatedClips = [...prevClips];
-        updatedClips[selectedClipIndex] = {
-          ...updatedClips[selectedClipIndex],
-          trimStart: currentTime
-        };
-        return updatedClips;
-      });
-    }
-  }, [selectedClipIndex, currentTime]);
-
-  const handleSetTrimEnd = useCallback(() => {
-    if (selectedClipIndex !== null) {
-      setClips(prevClips => {
-        const updatedClips = [...prevClips];
-        updatedClips[selectedClipIndex] = {
-          ...updatedClips[selectedClipIndex],
-          trimEnd: currentTime
-        };
-        return updatedClips;
-      });
-    }
-  }, [selectedClipIndex, currentTime]);
-
-  const handleClearTrim = useCallback(() => {
-    if (selectedClipIndex !== null) {
-      setClips(prevClips => {
-        const updatedClips = [...prevClips];
-        updatedClips[selectedClipIndex] = {
-          ...updatedClips[selectedClipIndex],
-          trimStart: null,
-          trimEnd: null
-        };
-        return updatedClips;
-      });
-    }
-  }, [selectedClipIndex]);
 
   const handleDeleteClip = useCallback((clipIndex) => {
     const clip = clips[clipIndex];
@@ -222,13 +190,120 @@ function AppContent({ clips, setClips }) {
     }
   }, [clips, timelineClips, selectedClipIndex, handleClipDeleted]);
 
-  // Keyboard event handler for Delete/Backspace - must be after handleDeleteClip
+  // Keyboard event handler for Delete/Backspace and 't' for trim
   useEffect(() => {
     const handleKeyDown = (e) => {
+      // Ignore if typing in an input field
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+        return;
+      }
+
+      // Handle 't' key for trim mode
+      if (e.key === 't' || e.key === 'T') {
+        e.preventDefault();
+
+        // If no clips on timeline, ignore
+        if (timelineClips.length === 0) {
+          return;
+        }
+
+        // If trim not started, start trim selection at current playhead
+        if (trimStartTime === null) {
+          console.log('[App] Starting trim selection at playhead:', playheadTime);
+          setTrimStartTime(playheadTime);
+          setIsTrimMode(true);
+          return;
+        }
+
+        // If trim already started, complete the trim
+        console.log('[App] Completing trim from', trimStartTime, 'to', playheadTime);
+
+        const startTime = Math.min(trimStartTime, playheadTime);
+        const endTime = Math.max(trimStartTime, playheadTime);
+
+        // Ignore if selection is too small
+        if (Math.abs(endTime - startTime) < 0.1) {
+          console.log('[App] Trim selection too small, ignoring');
+          setTrimStartTime(null);
+          setIsTrimMode(false);
+          return;
+        }
+
+        // Find which timeline clip(s) contain the selected region
+        const affectedClips = [];
+
+        for (const timelineClip of timelineClips) {
+          const clip = clips[timelineClip.clipIndex];
+          if (!clip) continue;
+
+          // Use timeline clip's trim points
+          const clipDuration = (timelineClip.trimEnd != null && timelineClip.trimStart != null)
+            ? timelineClip.trimEnd - timelineClip.trimStart
+            : clip.duration;
+
+          const clipEndTime = timelineClip.startTime + clipDuration;
+
+          // Check if this clip overlaps with the selection
+          if (timelineClip.startTime < endTime && clipEndTime > startTime) {
+            affectedClips.push({ timelineClip, clip, clipEndTime, clipDuration });
+          }
+        }
+
+        if (affectedClips.length === 0) {
+          console.log('[App] No clips found in trim selection');
+          setTrimStartTime(null);
+          setIsTrimMode(false);
+          return;
+        }
+
+        // For now, only handle trimming a single clip (the first affected one)
+        const { timelineClip, clip, clipEndTime, clipDuration } = affectedClips[0];
+
+        // Calculate where the selection intersects with this clip on the timeline
+        const clipStartTime = timelineClip.startTime;
+        const selectionStartInClip = Math.max(0, startTime - clipStartTime);
+        const selectionEndInClip = Math.min(clipDuration, endTime - clipStartTime);
+
+        // Determine trim type based on selection position
+        const startThreshold = clipDuration * 0.1; // First 10%
+        const endThreshold = clipDuration * 0.9;   // Last 10%
+
+        if (selectionStartInClip < startThreshold) {
+          // Trim from the start
+          const currentTrimStart = timelineClip.trimStart ?? 0;
+          const newTrimStart = currentTrimStart + selectionEndInClip;
+          const currentTrimEnd = timelineClip.trimEnd ?? clip.duration;
+
+          console.log('[App] Trimming from start:', { timelineClipId: timelineClip.id, newTrimStart, trimEnd: currentTrimEnd });
+          updateTimelineClipTrim(timelineClip.id, newTrimStart, currentTrimEnd);
+        } else if (selectionEndInClip > endThreshold) {
+          // Trim from the end
+          const currentTrimStart = timelineClip.trimStart ?? 0;
+          const currentTrimEnd = timelineClip.trimEnd ?? clip.duration;
+          const newTrimEnd = currentTrimStart + selectionStartInClip;
+
+          console.log('[App] Trimming from end:', { timelineClipId: timelineClip.id, trimStart: currentTrimStart, newTrimEnd });
+          updateTimelineClipTrim(timelineClip.id, currentTrimStart, newTrimEnd);
+        } else {
+          // Trim from the middle - split the clip
+          console.log('[App] Trimming from middle - splitting clip:', {
+            timelineClipId: timelineClip.id,
+            removeStart: selectionStartInClip,
+            removeEnd: selectionEndInClip
+          });
+          splitTimelineClip(timelineClip.id, selectionStartInClip, selectionEndInClip);
+        }
+
+        // Reset trim state
+        setTrimStartTime(null);
+        setIsTrimMode(false);
+        return;
+      }
+
       // Check if Delete or Backspace was pressed
       if (e.key === 'Delete' || e.key === 'Backspace') {
         // Prevent default backspace navigation
-        if (e.key === 'Backspace' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+        if (e.key === 'Backspace') {
           e.preventDefault();
         }
 
@@ -251,7 +326,7 @@ function AppContent({ clips, setClips }) {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedTimelineClipId, selectedClipIndex, removeClipFromTimeline, handleDeleteClip]);
+  }, [selectedTimelineClipId, selectedClipIndex, removeClipFromTimeline, handleDeleteClip, trimStartTime, playheadTime, timelineClips, clips, updateTimelineClipTrim, splitTimelineClip]);
 
   const handleExportVideo = async () => {
     try {
@@ -284,13 +359,13 @@ function AppContent({ clips, setClips }) {
       if (timelineClips.length > 0) {
         console.log('[App] Exporting timeline with', timelineClips.length, 'clips');
 
-        // Build clip segments array
+        // Build clip segments array - use timeline clip's trim points
         const clipSegments = timelineClips.map(tc => {
           const clip = clips[tc.clipIndex];
           return {
             input_path: clip.path,
-            trim_start: clip.trimStart ?? null,
-            trim_end: clip.trimEnd ?? null
+            trim_start: tc.trimStart ?? null,
+            trim_end: tc.trimEnd ?? null
           };
         });
 
@@ -347,10 +422,14 @@ function AppContent({ clips, setClips }) {
 
   const playingClip = currentTimelineClipInfo ? currentTimelineClipInfo.clip : null;
   const playingClipTime = currentTimelineClipInfo ? currentTimelineClipInfo.offsetInClip : 0;
+  // Get trim points from the timeline clip instance (not the source clip)
+  const playingTrimStart = currentTimelineClipInfo ? currentTimelineClipInfo.timelineClip.trimStart : null;
+  const playingTrimEnd = currentTimelineClipInfo ? currentTimelineClipInfo.timelineClip.trimEnd : null;
 
   console.log('[App] VideoPlayer will receive:');
   console.log('[App]   videoPath:', playingClip?.path);
   console.log('[App]   currentTime:', playingClipTime);
+  console.log('[App]   trimStart:', playingTrimStart, 'trimEnd:', playingTrimEnd);
 
   // Debug video playback
   if (timelineClips.length > 0 && !playingClip) {
@@ -409,17 +488,6 @@ function AppContent({ clips, setClips }) {
           </button>
           <button
             className="btn-secondary"
-            onClick={() => {
-              if (confirm('Clear timeline? This will remove all clips from the timeline but keep them in the library.')) {
-                clearTimeline();
-              }
-            }}
-            disabled={timelineClips.length === 0}
-          >
-            Clear Timeline
-          </button>
-          <button
-            className="btn-secondary"
             onClick={handleExportVideo}
             disabled={clips.length === 0 || isExporting}
           >
@@ -437,30 +505,41 @@ function AppContent({ clips, setClips }) {
             onTimeUpdate={handleTimelineTimeUpdate}
             currentTime={playingClipTime}
             onVideoLoaded={handleVideoLoaded}
-            trimStart={playingClip?.trimStart ?? null}
-            trimEnd={playingClip?.trimEnd ?? null}
+            trimStart={playingTrimStart}
+            trimEnd={playingTrimEnd}
           />
         </div>
 
         {/* Timeline Section - Fixed bottom area */}
         <div className="timeline-section">
-          {selectedClip && (
-            <TrimControls
-              currentTime={currentTime}
-              duration={selectedClip.duration}
-              trimStart={selectedClip.trimStart ?? null}
-              trimEnd={selectedClip.trimEnd ?? null}
-              onSetTrimStart={handleSetTrimStart}
-              onSetTrimEnd={handleSetTrimEnd}
-              onClearTrim={handleClearTrim}
-            />
-          )}
+          <div className="timeline-controls">
+            <button
+              className="btn-secondary"
+              onClick={() => {
+                if (confirm('Clear timeline? This will remove all clips from the timeline but keep them in the library.')) {
+                  clearTimeline();
+                }
+              }}
+              disabled={timelineClips.length === 0}
+            >
+              Clear Timeline
+            </button>
+            <button
+              className={`btn-secondary ${isTrimMode ? 'active' : ''}`}
+              disabled={timelineClips.length === 0}
+              title="Press 't' to start/complete trim at playhead position"
+            >
+              {trimStartTime !== null ? '✂️ Trimming... (press T)' : '✂️ Trim Mode (press T)'}
+            </button>
+          </div>
           <Timeline
             clips={clips}
             onClipSelect={handleClipSelect}
             selectedClipIndex={selectedClipIndex}
             selectedTimelineClipId={selectedTimelineClipId}
             onTimelineClipSelect={setSelectedTimelineClipId}
+            isTrimMode={isTrimMode}
+            trimStartTime={trimStartTime}
           />
         </div>
       </div>

@@ -66,25 +66,36 @@ function MediaLibraryDroppable({ clips, selectedClipIndex, onClipSelect, formatT
 }
 
 // Draggable Timeline Clip Block
-function DraggableTimelineClip({ timelineClip, clip, getPixelWidth, formatTime, onClipSelect, isSelected, onTimelineClipSelect }) {
+function DraggableTimelineClip({
+  timelineClip,
+  clip,
+  getPixelWidth,
+  formatTime,
+  onClipSelect,
+  isSelected,
+  onTimelineClipSelect,
+  isTrimMode
+}) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: timelineClip.id,
     data: {
       type: 'timeline-clip',
       timelineClipId: timelineClip.id,
       clipIndex: timelineClip.clipIndex
-    }
+    },
+    disabled: isTrimMode // Disable dragging when in trim mode
   });
 
-  const clipDuration = (clip.trimEnd != null && clip.trimStart != null)
-    ? clip.trimEnd - clip.trimStart
+  // Use timeline clip's trim points (not source clip's)
+  const clipDuration = (timelineClip.trimEnd != null && timelineClip.trimStart != null)
+    ? timelineClip.trimEnd - timelineClip.trimStart
     : clip.duration;
 
   const style = {
     left: `${getPixelWidth(timelineClip.startTime)}px`,
     width: `${getPixelWidth(clipDuration)}px`,
     opacity: isDragging ? 0.5 : 1,
-    cursor: isDragging ? 'grabbing' : 'grab'
+    cursor: isTrimMode ? 'crosshair' : (isDragging ? 'grabbing' : 'grab')
   };
 
   const handleClick = () => {
@@ -102,22 +113,16 @@ function DraggableTimelineClip({ timelineClip, clip, getPixelWidth, formatTime, 
     <div
       ref={setNodeRef}
       key={timelineClip.id}
-      className={`timeline-clip-block ${isSelected ? 'selected' : ''}`}
+      className={`timeline-clip-block ${isSelected ? 'selected' : ''} ${isTrimMode ? 'trim-mode' : ''}`}
       style={style}
       onClick={handleClick}
-      {...listeners}
-      {...attributes}
+      {...(!isTrimMode ? listeners : {})}
+      {...(!isTrimMode ? attributes : {})}
     >
       <div className="clip-block-content">
         <div className="clip-block-name">{clip.filename}</div>
         <div className="clip-block-duration">{formatTime(clipDuration)}</div>
       </div>
-
-      {/* Trim indicators - only show if actually trimmed */}
-      {(clip.trimStart != null && clip.trimStart > 0) ||
-       (clip.trimEnd != null && clip.trimEnd < clip.duration) ? (
-        <div className="clip-trimmed-badge">Trimmed</div>
-      ) : null}
     </div>
   );
 }
@@ -160,7 +165,9 @@ function Timeline({
   onClipSelect,
   selectedClipIndex,
   selectedTimelineClipId,
-  onTimelineClipSelect
+  onTimelineClipSelect,
+  isTrimMode = false,
+  trimStartTime = null
 }) {
   const { timelineClips, playheadTime, totalDuration, addClipToTimeline, removeClipFromTimeline, seekPlayhead } = useTimeline();
   const timelineTrackRef = useRef(null);
@@ -302,6 +309,8 @@ function Timeline({
           onClipSelect={onClipSelect}
           selectedTimelineClipId={selectedTimelineClipId}
           onTimelineClipSelect={onTimelineClipSelect}
+          isTrimMode={isTrimMode}
+          trimStartTime={trimStartTime}
         />
       </div>
 
@@ -330,7 +339,9 @@ function TimelineTrackDroppable({
   formatTime,
   onClipSelect,
   selectedTimelineClipId,
-  onTimelineClipSelect
+  onTimelineClipSelect,
+  isTrimMode,
+  trimStartTime
 }) {
   const { setNodeRef, isOver } = useDroppable({
     id: 'timeline-track'
@@ -401,9 +412,25 @@ function TimelineTrackDroppable({
                   onClipSelect={onClipSelect}
                   isSelected={tc.id === selectedTimelineClipId}
                   onTimelineClipSelect={onTimelineClipSelect}
+                  isTrimMode={isTrimMode}
                 />
               );
             })}
+
+            {/* Trim Selection Overlay - shown when trim mode is active */}
+            {isTrimMode && trimStartTime !== null && (
+              <div
+                className="trim-selection-region"
+                style={{
+                  left: `${getPixelWidth(Math.min(trimStartTime, playheadTime))}px`,
+                  width: `${getPixelWidth(Math.abs(playheadTime - trimStartTime))}px`
+                }}
+              >
+                <div className="trim-selection-label">
+                  Remove: {formatTime(Math.abs(playheadTime - trimStartTime))}
+                </div>
+              </div>
+            )}
 
             {/* Time Markers */}
             <div className="time-markers">

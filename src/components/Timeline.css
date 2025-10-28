@@ -330,6 +330,62 @@
   font-family: 'Courier New', monospace;
 }
 
+/* ========== TRIM MODE ========== */
+.timeline-clip-block.trim-mode {
+  cursor: default !important;
+}
+
+.timeline-clip-block.trim-mode:hover {
+  transform: none;
+  border-color: rgba(255, 255, 255, 0.5);
+}
+
+/* Trim selection region - overlay on timeline track */
+.trim-selection-region {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(255, 71, 87, 0.5);
+  border: 2px solid #ff4757;
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 150;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: pulse-trim 1s ease-in-out infinite;
+}
+
+@keyframes pulse-trim {
+  0%, 100% {
+    background: rgba(255, 71, 87, 0.4);
+    border-color: #ff4757;
+  }
+  50% {
+    background: rgba(255, 71, 87, 0.6);
+    border-color: #ff6b7a;
+  }
+}
+
+.trim-selection-label {
+  background: rgba(0, 0, 0, 0.9);
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #fff;
+  font-weight: 600;
+  font-family: 'Courier New', monospace;
+  white-space: nowrap;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+/* Active trim mode button styling */
+.btn-secondary.active {
+  background: #667eea;
+  color: white;
+  border-color: #667eea;
+}
+
 /* Scrollbar Styling */
 .timeline::-webkit-scrollbar,
 .library-clips::-webkit-scrollbar,

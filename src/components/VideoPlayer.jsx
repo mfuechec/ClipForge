@@ -13,12 +13,16 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
   // Store callbacks in refs to avoid recreating player when callbacks change
   const onTimeUpdateRef = useRef(onTimeUpdate);
   const onVideoLoadedRef = useRef(onVideoLoaded);
+  const trimStartRef = useRef(trimStart);
+  const trimEndRef = useRef(trimEnd);
 
   // Update refs when callbacks change
   useEffect(() => {
     onTimeUpdateRef.current = onTimeUpdate;
     onVideoLoadedRef.current = onVideoLoaded;
-  }, [onTimeUpdate, onVideoLoaded]);
+    trimStartRef.current = trimStart;
+    trimEndRef.current = trimEnd;
+  }, [onTimeUpdate, onVideoLoaded, trimStart, trimEnd]);
 
   // Initialize player when video element appears, update source when path changes
   useEffect(() => {
@@ -78,13 +82,40 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
 
       // Handle time updates - use ref to get latest callback
       player.on('timeupdate', () => {
+        const currentTime = player.currentTime();
+
         if (onTimeUpdateRef.current) {
-          onTimeUpdateRef.current(player.currentTime());
+          onTimeUpdateRef.current(currentTime);
+        }
+
+        // Enforce trim boundaries during playback - use refs to get latest values
+        const trimStart = trimStartRef.current;
+        const trimEnd = trimEndRef.current;
+
+        // trimEnd check: if we've reached the end of the trim range, pause
+        if (trimEnd != null && currentTime >= trimEnd) {
+          console.log('[VideoPlayer] Reached trim end point, pausing');
+          player.pause();
+          player.currentTime(trimEnd);
+        }
+
+        // trimStart check: if we've gone before the trim start, jump back
+        if (trimStart != null && currentTime < trimStart) {
+          console.log('[VideoPlayer] Before trim start point, jumping to start');
+          player.currentTime(trimStart);
         }
       });
 
       // Handle play/pause state
-      player.on('play', () => setIsPlaying(true));
+      player.on('play', () => {
+        setIsPlaying(true);
+        // When play starts, ensure we're at or after trimStart - use ref to get latest value
+        const trimStart = trimStartRef.current;
+        if (trimStart != null && player.currentTime() < trimStart) {
+          console.log('[VideoPlayer] Play started before trim start, seeking to:', trimStart);
+          player.currentTime(trimStart);
+        }
+      });
       player.on('pause', () => setIsPlaying(false));
 
       // Handle video end - pause instead of showing ended state
@@ -123,12 +154,43 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
   useEffect(() => {
     if (playerRef.current && currentTime !== undefined) {
       const player = playerRef.current;
+      let targetTime = currentTime;
+
+      // Constrain to trim boundaries if they exist
+      if (trimStart != null && targetTime < trimStart) {
+        console.log('[VideoPlayer] External seek before trim start, constraining to:', trimStart);
+        targetTime = trimStart;
+      }
+      if (trimEnd != null && targetTime > trimEnd) {
+        console.log('[VideoPlayer] External seek after trim end, constraining to:', trimEnd);
+        targetTime = trimEnd;
+      }
+
       // Only seek if the difference is significant (avoid jitter)
-      if (Math.abs(player.currentTime() - currentTime) > 0.1) {
-        player.currentTime(currentTime);
+      if (Math.abs(player.currentTime() - targetTime) > 0.1) {
+        player.currentTime(targetTime);
       }
     }
-  }, [currentTime]);
+  }, [currentTime, trimStart, trimEnd]);
+
+  // Handle trim boundary changes - ensure current playback position is valid
+  // Only adjust position if it's significantly outside boundaries (avoid micro-adjustments)
+  useEffect(() => {
+    if (playerRef.current) {
+      const player = playerRef.current;
+      const currentTime = player.currentTime();
+
+      // Only adjust if significantly outside boundaries (> 0.2 seconds)
+      if (trimStart != null && currentTime < trimStart - 0.2) {
+        console.log('[VideoPlayer] Trim boundaries changed - current time before new start, seeking to:', trimStart);
+        player.currentTime(trimStart);
+      } else if (trimEnd != null && currentTime > trimEnd + 0.2) {
+        console.log('[VideoPlayer] Trim boundaries changed - current time after new end, seeking to:', trimEnd);
+        player.currentTime(trimEnd);
+        player.pause(); // Also pause if we're beyond the end
+      }
+    }
+  }, [trimStart, trimEnd]);
 
   // Handle playback rate changes
   const handlePlaybackRateChange = (rate) => {

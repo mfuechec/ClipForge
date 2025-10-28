@@ -38,11 +38,12 @@ export function TimelineProvider({ children, clips }) {
     });
   }, [clips]);
 
-  // Helper: Calculate duration of a clip (accounting for trim points)
-  const calculateDuration = useCallback((clip) => {
+  // Helper: Calculate duration of a timeline clip (accounting for trim points)
+  const calculateDuration = useCallback((timelineClip, clip) => {
     if (!clip) return 0;
-    return (clip.trimEnd != null && clip.trimStart != null)
-      ? clip.trimEnd - clip.trimStart
+    // Use timeline clip's trim points if they exist, otherwise use full clip duration
+    return (timelineClip.trimEnd != null && timelineClip.trimStart != null)
+      ? timelineClip.trimEnd - timelineClip.trimStart
       : clip.duration || 0;
   }, []);
 
@@ -51,7 +52,7 @@ export function TimelineProvider({ children, clips }) {
     let currentTime = 0;
     return timelineClipsArray.map(tc => {
       const startTime = currentTime;
-      currentTime += calculateDuration(clipsArray[tc.clipIndex]);
+      currentTime += calculateDuration(tc, clipsArray[tc.clipIndex]);
       return { ...tc, startTime };
     });
   }, [calculateDuration]);
@@ -64,7 +65,7 @@ export function TimelineProvider({ children, clips }) {
     timelineClips.forEach(timelineClip => {
       const clip = clips[timelineClip.clipIndex];
       if (clip) {
-        const duration = calculateDuration(clip);
+        const duration = calculateDuration(timelineClip, clip);
         const endTime = timelineClip.startTime + duration;
         maxEndTime = Math.max(maxEndTime, endTime);
       }
@@ -82,11 +83,13 @@ export function TimelineProvider({ children, clips }) {
     console.log('[TimelineContext] Adding clip', clipIndex, 'to timeline');
 
     setTimelineClips(prev => {
-      // Create new timeline clip
+      // Create new timeline clip with no trim points (use full clip)
       const newClip = {
         id: `timeline-clip-${Date.now()}-${Math.random()}`, // Unique ID for drag-and-drop
         clipIndex,
-        startTime: 0  // Temporary, will be set by reflow
+        startTime: 0,  // Temporary, will be set by reflow
+        trimStart: null,  // No trim initially
+        trimEnd: null     // No trim initially
       };
 
       // Add to end of timeline
@@ -166,8 +169,9 @@ export function TimelineProvider({ children, clips }) {
         continue;
       }
 
-      const duration = (clip.trimEnd != null && clip.trimStart != null)
-        ? clip.trimEnd - clip.trimStart
+      // Use timeline clip's trim points
+      const duration = (timelineClip.trimEnd != null && timelineClip.trimStart != null)
+        ? timelineClip.trimEnd - timelineClip.trimStart
         : clip.duration;
 
       const endTime = timelineClip.startTime + duration;
@@ -180,10 +184,10 @@ export function TimelineProvider({ children, clips }) {
         : (time >= timelineClip.startTime && time < endTime);
 
       if (isInRange) {
-        // Calculate offset within the clip (accounting for trim)
+        // Calculate offset within the clip (accounting for timeline clip's trim)
         const offsetInClip = time - timelineClip.startTime;
-        const actualClipTime = (clip.trimStart != null)
-          ? clip.trimStart + offsetInClip
+        const actualClipTime = (timelineClip.trimStart != null)
+          ? timelineClip.trimStart + offsetInClip
           : offsetInClip;
 
         return {
@@ -196,6 +200,84 @@ export function TimelineProvider({ children, clips }) {
 
     return null;
   }, [timelineClips, clips]);
+
+  // Update trim points for a specific timeline clip
+  const updateTimelineClipTrim = useCallback((timelineClipId, trimStart, trimEnd) => {
+    console.log('[TimelineContext] Updating trim for timeline clip', timelineClipId, 'to:', { trimStart, trimEnd });
+
+    setTimelineClips(prev => {
+      // Update the trim points for the specified timeline clip
+      const updated = prev.map(tc =>
+        tc.id === timelineClipId
+          ? { ...tc, trimStart, trimEnd }
+          : tc
+      );
+
+      // Reflow to adjust positions based on new durations
+      const reflowedClips = reflowTimeline(updated, clips);
+
+      console.log('[TimelineContext] Timeline clip trim updated and reflowed');
+
+      return reflowedClips;
+    });
+  }, [clips, reflowTimeline]);
+
+  // Split a timeline clip by removing a middle section
+  const splitTimelineClip = useCallback((timelineClipId, removeStart, removeEnd) => {
+    console.log('[TimelineContext] Splitting timeline clip', timelineClipId, 'removing:', { removeStart, removeEnd });
+
+    setTimelineClips(prev => {
+      // Find the clip to split
+      const clipIndex = prev.findIndex(tc => tc.id === timelineClipId);
+      if (clipIndex === -1) {
+        console.error('[TimelineContext] Timeline clip not found:', timelineClipId);
+        return prev;
+      }
+
+      const originalClip = prev[clipIndex];
+      const clip = clips[originalClip.clipIndex];
+
+      if (!clip) {
+        console.error('[TimelineContext] Source clip not found');
+        return prev;
+      }
+
+      const currentTrimStart = originalClip.trimStart ?? 0;
+      const currentTrimEnd = originalClip.trimEnd ?? clip.duration;
+
+      // Create two new clips from the split
+      const firstClip = {
+        id: `timeline-clip-${Date.now()}-${Math.random()}-first`,
+        clipIndex: originalClip.clipIndex,
+        startTime: 0, // Will be set by reflow
+        trimStart: currentTrimStart,
+        trimEnd: currentTrimStart + removeStart
+      };
+
+      const secondClip = {
+        id: `timeline-clip-${Date.now()}-${Math.random()}-second`,
+        clipIndex: originalClip.clipIndex,
+        startTime: 0, // Will be set by reflow
+        trimStart: currentTrimStart + removeEnd,
+        trimEnd: currentTrimEnd
+      };
+
+      // Replace the original clip with the two new clips
+      const updated = [
+        ...prev.slice(0, clipIndex),
+        firstClip,
+        secondClip,
+        ...prev.slice(clipIndex + 1)
+      ];
+
+      // Reflow to adjust positions
+      const reflowedClips = reflowTimeline(updated, clips);
+
+      console.log('[TimelineContext] Timeline clip split and reflowed');
+
+      return reflowedClips;
+    });
+  }, [clips, reflowTimeline]);
 
   // Clear the entire timeline
   const clearTimeline = useCallback(() => {
@@ -230,6 +312,8 @@ export function TimelineProvider({ children, clips }) {
     addClipToTimeline,
     removeClipFromTimeline,
     reorderTimelineClips,
+    updateTimelineClipTrim,
+    splitTimelineClip,
     seekPlayhead,
     getActiveClipAtTime,
     clearTimeline,
