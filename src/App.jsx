@@ -23,6 +23,7 @@ function AppContent({ clips, setClips }) {
   const [transcriptCollapsed, setTranscriptCollapsed] = useState(true);
   const [activeId, setActiveId] = useState(null);
   const dragStartTimeRef = useRef(0);
+  const currentDragPositionRef = useRef({ x: 0, y: 0 });
 
   // Get timeline state and functions from context
   const {
@@ -31,6 +32,7 @@ function AppContent({ clips, setClips }) {
     totalDuration,
     addClipToTimeline,
     removeClipFromTimeline,
+    reorderTimelineClips,
     updateTimelineClipTrim,
     splitTimelineClip,
     seekPlayhead,
@@ -177,7 +179,6 @@ function AppContent({ clips, setClips }) {
       // Don't auto-select - let user drag to timeline
 
       console.log('[App] Recording imported successfully');
-      alert('Recording complete! Your video has been added to the media library. Drag it to the timeline to use it.');
     } catch (error) {
       console.error('[App] Failed to import recording:', error);
       alert(`Failed to import recording: ${error}`);
@@ -268,30 +269,21 @@ function AppContent({ clips, setClips }) {
       return;
     }
 
-    // Check if clip is used in timeline
-    const usedInTimeline = timelineClips.some(tc => tc.clipIndex === clipIndex);
+    console.log('[App] Deleting clip at index:', clipIndex, clip.filename);
 
-    const message = usedInTimeline
-      ? `Delete "${clip.filename}"?\n\nThis will remove it from the timeline and media library.`
-      : `Delete "${clip.filename}"?\n\nThis cannot be undone.`;
-
-    if (window.confirm(message)) {
-      console.log('[App] Deleting clip at index:', clipIndex, clip.filename);
-
-      // Clear selection if deleting the selected clip
-      if (selectedClipIndex === clipIndex) {
-        setSelectedClipIndex(null);
-      } else if (selectedClipIndex !== null && selectedClipIndex > clipIndex) {
-        // Adjust selection index if it's after the deleted clip
-        setSelectedClipIndex(selectedClipIndex - 1);
-      }
-
-      // Notify timeline context to clean up before deletion
-      handleClipDeleted(clipIndex);
-
-      // Remove from clips array
-      setClips(prevClips => prevClips.filter((_, idx) => idx !== clipIndex));
+    // Clear selection if deleting the selected clip
+    if (selectedClipIndex === clipIndex) {
+      setSelectedClipIndex(null);
+    } else if (selectedClipIndex !== null && selectedClipIndex > clipIndex) {
+      // Adjust selection index if it's after the deleted clip
+      setSelectedClipIndex(selectedClipIndex - 1);
     }
+
+    // Notify timeline context to clean up before deletion
+    handleClipDeleted(clipIndex);
+
+    // Remove from clips array
+    setClips(prevClips => prevClips.filter((_, idx) => idx !== clipIndex));
   }, [clips, timelineClips, selectedClipIndex, handleClipDeleted]);
 
   // Handle clip mode toggle/action (called by both button and keyboard)
@@ -571,6 +563,73 @@ function AppContent({ clips, setClips }) {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedTimelineClipId, selectedClipIndex, removeClipFromTimeline, handleDeleteClip, trimStartTime, clipStartTime, playheadTime, timelineClips, clips, updateTimelineClipTrim, splitTimelineClip, handleClipModeAction]);
 
+  const handleMergeTimeline = async () => {
+    if (timelineClips.length === 0) {
+      return;
+    }
+
+    if (timelineClips.length === 1) {
+      return;
+    }
+
+    try {
+      setIsExporting(true);
+
+      // Generate output filename automatically
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+      const outputFilename = `merged_timeline_${timestamp}.mp4`;
+
+      // Use the same directory as the first clip
+      const firstClip = clips[timelineClips[0].clipIndex];
+      const sourceDir = firstClip.path.substring(0, firstClip.path.lastIndexOf('/'));
+      const outputPath = `${sourceDir}/${outputFilename}`;
+
+      console.log('[App] Merging timeline with', timelineClips.length, 'clips to:', outputPath);
+
+      // Build clip segments array - use timeline clip's trim points
+      const clipSegments = timelineClips.map(tc => {
+        const clip = clips[tc.clipIndex];
+        return {
+          input_path: clip.path,
+          trim_start: tc.trimStart ?? null,
+          trim_end: tc.trimEnd ?? null
+        };
+      });
+
+      const result = await invoke('export_multi_clip', {
+        options: {
+          clips: clipSegments,
+          output_path: outputPath
+        }
+      });
+
+      console.log('[App] Timeline merge successful:', result);
+
+      // Import the merged clip back into the library
+      const metadata = await invoke('import_video', { path: result });
+      console.log('[App] Imported merged clip:', metadata);
+
+      // Add to clips array
+      const newClips = [...clips, metadata];
+      setClips(newClips);
+
+      // Clear the timeline and add the merged clip
+      clearTimeline();
+
+      // Wait a tick for state to update, then add the merged clip
+      setTimeout(() => {
+        addClipToTimeline(newClips.length - 1, null, newClips);
+      }, 0);
+
+      console.log('[App] Merged clip added to timeline');
+    } catch (error) {
+      console.error('[App] Merge failed:', error);
+      alert(`Merge failed: ${error}`);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   const handleExportVideo = async () => {
     try {
       setIsExporting(true);
@@ -722,6 +781,14 @@ function AppContent({ clips, setClips }) {
     const { active, delta } = event;
     const dragType = active.data.current?.type;
 
+    // Track current drag position for drop calculation
+    if (event.activatorEvent?.clientX !== undefined) {
+      currentDragPositionRef.current = {
+        x: event.activatorEvent.clientX + delta.x,
+        y: event.activatorEvent.clientY + delta.y
+      };
+    }
+
     if (dragType === 'playhead') {
       const pixelsPerSecond = 20;
       const timeDelta = delta.x / pixelsPerSecond;
@@ -739,6 +806,37 @@ function AppContent({ clips, setClips }) {
       return;
     }
 
+    // Helper function to calculate insertion index based on drop position
+    const calculateInsertionIndex = (clientX) => {
+      const timelineTrack = document.querySelector('.timeline-track');
+      if (!timelineTrack) return null;
+
+      const rect = timelineTrack.getBoundingClientRect();
+      const dropX = clientX - rect.left;
+      const pixelsPerSecond = 20;
+      const dropTime = Math.max(0, dropX / pixelsPerSecond);
+
+      // Find which index to insert at based on drop time
+      let insertIndex = 0;
+      for (let i = 0; i < timelineClips.length; i++) {
+        const tc = timelineClips[i];
+        const clip = clips[tc.clipIndex];
+        if (!clip) continue;
+
+        const duration = (tc.trimEnd != null && tc.trimStart != null)
+          ? tc.trimEnd - tc.trimStart
+          : clip.duration;
+        const midPoint = tc.startTime + duration / 2;
+
+        if (dropTime < midPoint) {
+          break;
+        }
+        insertIndex = i + 1;
+      }
+
+      return insertIndex;
+    };
+
     // Handle media clip dragging to timeline
     if (dragType === 'media-clip' && over?.id === 'timeline-track') {
       const clipIndex = active.data.current.clipIndex;
@@ -749,7 +847,36 @@ function AppContent({ clips, setClips }) {
         return;
       }
 
-      addClipToTimeline(clipIndex, null, clips);
+      // Get the mouse position from the tracked position
+      const clientX = currentDragPositionRef.current.x;
+      const insertIndex = clientX !== undefined ? calculateInsertionIndex(clientX) : null;
+
+      console.log('[App] Dropping media clip at index:', insertIndex);
+      addClipToTimeline(clipIndex, null, clips, insertIndex);
+      return;
+    }
+
+    // Handle timeline clip reordering (dragging within timeline)
+    if (dragType === 'timeline-clip' && over?.id === 'timeline-track') {
+      const timelineClipId = active.data.current.timelineClipId;
+
+      // Get the mouse position from the tracked position
+      const clientX = currentDragPositionRef.current.x;
+      let insertIndex = clientX !== undefined ? calculateInsertionIndex(clientX) : null;
+
+      if (insertIndex !== null) {
+        // Find the current index of the clip being moved
+        const currentIndex = timelineClips.findIndex(tc => tc.id === timelineClipId);
+
+        // Adjust insertion index if moving a clip to a later position
+        // (because the clip will be removed first, shifting indices down)
+        if (currentIndex !== -1 && insertIndex > currentIndex) {
+          insertIndex = Math.max(0, insertIndex - 1);
+        }
+
+        console.log('[App] Reordering timeline clip from index', currentIndex, 'to index:', insertIndex);
+        reorderTimelineClips(timelineClipId, insertIndex);
+      }
       return;
     }
 
@@ -759,7 +886,7 @@ function AppContent({ clips, setClips }) {
       removeClipFromTimeline(timelineClipId);
       return;
     }
-  }, [clips, addClipToTimeline, removeClipFromTimeline]);
+  }, [clips, timelineClips, addClipToTimeline, removeClipFromTimeline, reorderTimelineClips]);
 
   // Get active dragged item for overlay
   const getActiveItem = useCallback(() => {
@@ -789,7 +916,7 @@ function AppContent({ clips, setClips }) {
 
   // Calculate grid columns and rows based on collapsed states
   const gridColumns = `${mediaLibraryCollapsed ? '0' : '200px'} 1fr ${transcriptCollapsed ? '0' : '250px'}`;
-  const gridRows = `60px 1fr ${transcriptCollapsed ? '280px' : '200px'}`; // Shorter timeline when transcript is open
+  const gridRows = `60px 1fr 280px`; // Fixed timeline height
 
   return (
     <DndContext sensors={sensors} onDragStart={handleDragStart} onDragMove={handleDragMove} onDragEnd={handleDragEnd}>
@@ -863,6 +990,14 @@ function AppContent({ clips, setClips }) {
             disabled={timelineClips.length === 0}
           >
             Clear Timeline
+          </button>
+          <button
+            className="btn-secondary"
+            onClick={handleMergeTimeline}
+            disabled={timelineClips.length < 2 || isExporting}
+            title="Merge all timeline clips into a single clip and add to library"
+          >
+            {isExporting ? '🔄 Merging...' : '🔗 Merge Timeline'}
           </button>
           <button
             className={`btn-secondary ${isTrimMode ? 'active' : ''}`}

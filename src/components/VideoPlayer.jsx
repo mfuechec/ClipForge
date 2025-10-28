@@ -195,8 +195,26 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
   // Handle playback rate changes
   const handlePlaybackRateChange = (rate) => {
     if (playerRef.current) {
-      playerRef.current.playbackRate(rate);
+      const player = playerRef.current;
+      const wasPlaying = !player.paused();
+
+      // Change the playback rate
+      player.playbackRate(rate);
       setPlaybackRate(rate);
+
+      // If the video was playing, ensure it continues playing
+      if (wasPlaying) {
+        // Use a small timeout to ensure the rate change has been applied
+        setTimeout(() => {
+          if (player && !player.paused()) {
+            // Already playing, do nothing
+          } else if (player) {
+            player.play().catch(err => {
+              console.warn('[VideoPlayer] Could not resume playback after rate change:', err);
+            });
+          }
+        }, 0);
+      }
     }
   };
 
@@ -209,6 +227,56 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
       }
     }
   };
+
+  // Handle keyboard shortcuts for video playback
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // Ignore if typing in an input field
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+        return;
+      }
+
+      // Don't handle if no video is loaded
+      if (!playerRef.current || !videoPath) {
+        return;
+      }
+
+      const player = playerRef.current;
+
+      // Spacebar - play/pause
+      if (e.code === 'Space') {
+        e.preventDefault();
+        if (player.paused()) {
+          player.play();
+        } else {
+          player.pause();
+        }
+        return;
+      }
+
+      // Arrow keys - seek forward/backward by 1 frame (assuming 30fps = ~0.033s per frame)
+      const frameTime = 1 / 30; // One frame at 30fps
+
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        const newTime = Math.max(trimStart || 0, player.currentTime() - frameTime);
+        player.currentTime(newTime);
+        return;
+      }
+
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        const duration = player.duration();
+        const maxTime = trimEnd != null ? Math.min(trimEnd, duration) : duration;
+        const newTime = Math.min(maxTime, player.currentTime() + frameTime);
+        player.currentTime(newTime);
+        return;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [videoPath, trimStart, trimEnd]);
 
   return (
     <div className="video-player">
@@ -232,51 +300,6 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
           }}
         />
       </div>
-
-      {/* Playback controls - only show when video is loaded */}
-      {videoPath && (
-        <div className="playback-controls">
-          <button
-            className={`btn-play-pause ${isPlaying ? 'playing' : 'paused'}`}
-            onClick={handlePlayPause}
-            title={isPlaying ? 'Pause' : 'Play'}
-          >
-            {isPlaying ? '⏸' : '▶'}
-          </button>
-          <span className="playback-label">Speed:</span>
-          <button
-            className={`speed-btn ${playbackRate === 0.5 ? 'active' : ''}`}
-            onClick={() => handlePlaybackRateChange(0.5)}
-          >
-            0.5x
-          </button>
-          <button
-            className={`speed-btn ${playbackRate === 1.0 ? 'active' : ''}`}
-            onClick={() => handlePlaybackRateChange(1.0)}
-          >
-            1x
-          </button>
-          <button
-            className={`speed-btn ${playbackRate === 1.5 ? 'active' : ''}`}
-            onClick={() => handlePlaybackRateChange(1.5)}
-          >
-            1.5x
-          </button>
-          <button
-            className={`speed-btn ${playbackRate === 2.0 ? 'active' : ''}`}
-            onClick={() => handlePlaybackRateChange(2.0)}
-          >
-            2x
-          </button>
-          <button
-            className={`speed-btn ${playbackRate === 3.0 ? 'active' : ''}`}
-            onClick={() => handlePlaybackRateChange(3.0)}
-          >
-            3x
-          </button>
-          <span className="current-rate">Current: {playbackRate}x</span>
-        </div>
-      )}
 
       {/* Placeholder - only show when no video */}
       {!videoPath && (

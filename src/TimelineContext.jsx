@@ -75,12 +75,12 @@ export function TimelineProvider({ children, clips }) {
     return maxEndTime;
   }, [timelineClips, clips, calculateDuration]);
 
-  // Add a clip to the timeline at a specific time position
-  const addClipToTimeline = useCallback((clipIndex, startTime = null, freshClips = null) => {
+  // Add a clip to the timeline at a specific time position or index
+  const addClipToTimeline = useCallback((clipIndex, startTime = null, freshClips = null, insertAtIndex = null) => {
     // Use fresh clips array passed from caller, or fallback to context clips
     const clipsToUse = freshClips || clips;
 
-    console.log('[TimelineContext] Adding clip', clipIndex, 'to timeline');
+    console.log('[TimelineContext] Adding clip', clipIndex, 'to timeline at index', insertAtIndex);
 
     setTimelineClips(prev => {
       // Create new timeline clip with no trim points (use full clip)
@@ -92,8 +92,17 @@ export function TimelineProvider({ children, clips }) {
         trimEnd: null     // No trim initially
       };
 
-      // Add to end of timeline
-      const updatedClips = [...prev, newClip];
+      // Insert at specific index or add to end of timeline
+      let updatedClips;
+      if (insertAtIndex !== null && insertAtIndex >= 0 && insertAtIndex <= prev.length) {
+        updatedClips = [
+          ...prev.slice(0, insertAtIndex),
+          newClip,
+          ...prev.slice(insertAtIndex)
+        ];
+      } else {
+        updatedClips = [...prev, newClip];
+      }
 
       // Reflow to ensure sequential arrangement
       const reflowedClips = reflowTimeline(updatedClips, clipsToUse);
@@ -122,15 +131,41 @@ export function TimelineProvider({ children, clips }) {
   }, [clips, reflowTimeline]);
 
   // Reorder clips on the timeline (for drag-and-drop within timeline)
-  const reorderTimelineClips = useCallback((timelineClipId, newStartTime) => {
-    setTimelineClips(prev =>
-      prev.map(tc =>
-        tc.id === timelineClipId
-          ? { ...tc, startTime: newStartTime }
-          : tc
-      )
-    );
-  }, []);
+  const reorderTimelineClips = useCallback((timelineClipId, newIndex) => {
+    console.log('[TimelineContext] Reordering clip', timelineClipId, 'to index', newIndex);
+
+    setTimelineClips(prev => {
+      // Find the clip being moved
+      const clipIndex = prev.findIndex(tc => tc.id === timelineClipId);
+      if (clipIndex === -1) {
+        console.error('[TimelineContext] Clip not found:', timelineClipId);
+        return prev;
+      }
+
+      // If index hasn't changed, no need to reorder
+      if (clipIndex === newIndex) {
+        return prev;
+      }
+
+      // Remove the clip from its current position
+      const clip = prev[clipIndex];
+      const withoutClip = [...prev.slice(0, clipIndex), ...prev.slice(clipIndex + 1)];
+
+      // Insert at new position
+      const reordered = [
+        ...withoutClip.slice(0, newIndex),
+        clip,
+        ...withoutClip.slice(newIndex)
+      ];
+
+      // Reflow to update start times
+      const reflowedClips = reflowTimeline(reordered, clips);
+
+      console.log('[TimelineContext] Timeline clips reordered and reflowed');
+
+      return reflowedClips;
+    });
+  }, [clips, reflowTimeline]);
 
   // Seek playhead to a specific time
   const seekPlayhead = useCallback((time) => {

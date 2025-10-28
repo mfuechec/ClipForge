@@ -52,7 +52,7 @@
    ======================================== */
 .media-panel {
   grid-column: 1;
-  grid-row: 2 / 4;
+  grid-row: 2;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
   display: flex;
@@ -202,7 +202,7 @@
    ======================================== */
 .transcript-panel {
   grid-column: 3;
-  grid-row: 2 / 4;
+  grid-row: 2;
   background: var(--bg-secondary);
   border-left: 1px solid var(--border);
   display: flex;
