@@ -49,6 +49,14 @@ fn find_ffprobe() -> String {
     "ffprobe".to_string()
 }
 
+// Helper function to find ScreenRecorder Swift helper
+#[cfg(target_os = "macos")]
+fn find_screen_recorder() -> PathBuf {
+    // The binary is compiled to src-tauri/swift-helper/ScreenRecorder during build
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    PathBuf::from(manifest_dir).join("swift-helper").join("ScreenRecorder")
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VideoMetadata {
     path: String,
@@ -659,6 +667,22 @@ pub struct StartRecordingOptions {
     audio_settings: Option<AudioSettings>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TestSettings {
+    use_wallclock_as_timestamps: bool,
+    audio_filter: String,
+    rtbufsize: String,
+    thread_queue_size: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StartTestRecordingOptions {
+    mode: String,
+    output_path: String,
+    audio_settings: Option<AudioSettings>,
+    test_settings: TestSettings,
+}
+
 #[tauri::command]
 fn list_audio_devices() -> Result<Vec<AudioDevice>, String> {
     log::info!("Listing audio devices");
@@ -765,6 +789,11 @@ fn start_recording(options: StartRecordingOptions, state: State<RecordingState>)
     let ffmpeg = find_ffmpeg();
     let mut cmd = Command::new(&ffmpeg);
 
+    // Add global sync and buffer parameters for all platforms
+    // These ensure audio/video stay synchronized during capture
+    cmd.arg("-loglevel").arg("verbose")  // Verbose logging for diagnostics
+        .arg("-rtbufsize").arg("200M");  // Larger realtime buffer to prevent audio drops
+
     #[cfg(target_os = "macos")]
     {
         // Get audio settings or use defaults
@@ -793,7 +822,9 @@ fn start_recording(options: StartRecordingOptions, state: State<RecordingState>)
             "screen" => {
                 cmd.arg("-f").arg("avfoundation")
                     .arg("-capture_cursor").arg("1")
-                    .arg("-framerate").arg("30");
+                    .arg("-framerate").arg("15")
+                    // Use wallclock timestamps for consistent timing across inputs
+                    .arg("-use_wallclock_as_timestamps").arg("1");
 
                 // Handle dual audio (mic + system) vs single audio source
                 if mic_enabled && sys_audio_enabled {
@@ -812,11 +843,19 @@ fn start_recording(options: StartRecordingOptions, state: State<RecordingState>)
                     cmd.arg("-i").arg("1:none");
 
                     // Microphone audio input
-                    cmd.arg("-f").arg("avfoundation")
+                    cmd.arg("-probesize").arg("100M")  // Large probe buffer for stable detection
+                        .arg("-rtbufsize").arg("200M")  // Large realtime buffer to prevent drops
+                        .arg("-f").arg("avfoundation")
+                        // Use device timestamps for audio (not wallclock - prevents choppiness)
+                        .arg("-thread_queue_size").arg("8192")  // Very large queue for smooth audio
                         .arg("-i").arg(&format!(":{}", mic_device));
 
                     // System audio input (BlackHole or similar)
-                    cmd.arg("-f").arg("avfoundation")
+                    cmd.arg("-probesize").arg("100M")  // Large probe buffer for stable detection
+                        .arg("-rtbufsize").arg("200M")  // Large realtime buffer to prevent drops
+                        .arg("-f").arg("avfoundation")
+                        // Use device timestamps for audio (not wallclock - prevents choppiness)
+                        .arg("-thread_queue_size").arg("8192")  // Very large queue for smooth audio
                         .arg("-i").arg(&format!(":{}", sys_audio_device));
                 } else if mic_enabled {
                     // Just microphone
@@ -844,6 +883,8 @@ fn start_recording(options: StartRecordingOptions, state: State<RecordingState>)
                     // Capture webcam with microphone audio
                     cmd.arg("-f").arg("avfoundation")
                         .arg("-framerate").arg("30")
+                        // Use wallclock timestamps for consistent timing
+                        .arg("-use_wallclock_as_timestamps").arg("1")
                         .arg("-i").arg(&format!("0:{}", mic_device));
 
                     // Explicitly map video and audio streams
@@ -853,6 +894,8 @@ fn start_recording(options: StartRecordingOptions, state: State<RecordingState>)
                     // Capture webcam without audio
                     cmd.arg("-f").arg("avfoundation")
                         .arg("-framerate").arg("30")
+                        // Use wallclock timestamps for consistent timing
+                        .arg("-use_wallclock_as_timestamps").arg("1")
                         .arg("-i").arg("0:none");
                 }
             },
@@ -860,18 +903,22 @@ fn start_recording(options: StartRecordingOptions, state: State<RecordingState>)
                 // For combo mode: capture screen + webcam, then overlay webcam on screen
 
                 // Input 0: Screen video (no audio attached to avoid conflicts)
-                // Add thread_queue_size for better buffering and sync
-                cmd.arg("-thread_queue_size").arg("512")
+                // Increased thread_queue_size for better buffering and sync (was 512)
+                cmd.arg("-thread_queue_size").arg("2048")
                     .arg("-f").arg("avfoundation")
                     .arg("-capture_cursor").arg("1")
                     .arg("-framerate").arg("30")
+                    // Use wallclock timestamps for consistent timing across all inputs
+                    .arg("-use_wallclock_as_timestamps").arg("1")
                     .arg("-i").arg("1:none");
 
                 // Input 1: Webcam video (no audio, we'll handle audio separately)
-                // Add thread_queue_size for smooth capture
-                cmd.arg("-thread_queue_size").arg("512")
+                // Increased thread_queue_size for smooth capture
+                cmd.arg("-thread_queue_size").arg("2048")
                     .arg("-f").arg("avfoundation")
                     .arg("-framerate").arg("30")
+                    // Use wallclock timestamps for consistent timing
+                    .arg("-use_wallclock_as_timestamps").arg("1")
                     .arg("-i").arg("0:none");
 
                 // Handle audio inputs separately (similar to screen mode dual audio)
@@ -887,18 +934,27 @@ fn start_recording(options: StartRecordingOptions, state: State<RecordingState>)
                         .unwrap_or("1");
 
                     // Input 2: Microphone audio
-                    cmd.arg("-thread_queue_size").arg("512")
+                    cmd.arg("-probesize").arg("100M")  // Large probe buffer for stable detection
+                        .arg("-rtbufsize").arg("200M")  // Large realtime buffer to prevent drops
+                        .arg("-thread_queue_size").arg("8192")
                         .arg("-f").arg("avfoundation")
+                        // Use device timestamps for audio (not wallclock - prevents choppiness)
                         .arg("-i").arg(&format!(":{}", mic_device));
 
                     // Input 3: System audio
-                    cmd.arg("-thread_queue_size").arg("512")
+                    cmd.arg("-probesize").arg("100M")  // Large probe buffer for stable detection
+                        .arg("-rtbufsize").arg("200M")  // Large realtime buffer to prevent drops
+                        .arg("-thread_queue_size").arg("8192")
                         .arg("-f").arg("avfoundation")
+                        // Use device timestamps for audio (not wallclock - prevents choppiness)
                         .arg("-i").arg(&format!(":{}", sys_audio_device));
                 } else if mic_enabled {
                     // Input 2: Just microphone
-                    cmd.arg("-thread_queue_size").arg("512")
+                    cmd.arg("-probesize").arg("100M")  // Large probe buffer for stable detection
+                        .arg("-rtbufsize").arg("200M")  // Large realtime buffer to prevent drops
+                        .arg("-thread_queue_size").arg("8192")
                         .arg("-f").arg("avfoundation")
+                        // Use device timestamps for audio (not wallclock - prevents choppiness)
                         .arg("-i").arg(&format!(":{}", mic_device));
                 } else if sys_audio_enabled {
                     // Input 2: Just system audio
@@ -911,8 +967,11 @@ fn start_recording(options: StartRecordingOptions, state: State<RecordingState>)
                             }
                         })
                         .unwrap_or("1");
-                    cmd.arg("-thread_queue_size").arg("512")
+                    cmd.arg("-probesize").arg("100M")  // Large probe buffer for stable detection
+                        .arg("-rtbufsize").arg("200M")  // Large realtime buffer to prevent drops
+                        .arg("-thread_queue_size").arg("8192")
                         .arg("-f").arg("avfoundation")
+                        // Use device timestamps for audio (not wallclock - prevents choppiness)
                         .arg("-i").arg(&format!(":{}", sys_audio_device));
                 }
             },
@@ -966,21 +1025,33 @@ fn start_recording(options: StartRecordingOptions, state: State<RecordingState>)
     let is_combo_mode = false;
 
     if !is_combo_mode {
-        // Simple scale for screen and webcam modes
-        cmd.arg("-vf").arg("scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2");
+        // Simple scale for screen and webcam modes - 720p to reduce CPU load
+        cmd.arg("-vf").arg("scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2");
     }
 
-    cmd.arg("-c:v").arg("libx264")
-        .arg("-preset").arg("veryfast") // Balanced encoding: fast recording + smooth playback
-        .arg("-tune").arg("fastdecode") // Optimize for decode performance
-        .arg("-profile:v").arg("main") // Main profile for better hardware decode support
-        .arg("-level").arg("4.0") // Level 4.0 = max 1080p60, ensures hardware decode
-        .arg("-crf").arg("23") // Quality
+    #[cfg(target_os = "macos")]
+    {
+        // Use hardware encoding on macOS (VideoToolbox) - offloads video to GPU
+        cmd.arg("-c:v").arg("h264_videotoolbox")
+            .arg("-b:v").arg("5000k") // 5 Mbps bitrate for good quality
+            .arg("-allow_sw").arg("1") // Fallback to software if hardware unavailable
+            .arg("-require_sw").arg("0"); // Prefer hardware encoding
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Software encoding for non-macOS platforms
+        cmd.arg("-c:v").arg("libx264")
+            .arg("-preset").arg("ultrafast")
+            .arg("-crf").arg("23");
+    }
+
+    cmd
         .arg("-pix_fmt").arg("yuv420p") // Standard pixel format
-        // CRITICAL: Force constant frame rate at 30fps
-        .arg("-r").arg("30")
+        // CRITICAL: Force constant frame rate at 15fps
+        .arg("-r").arg("15")
         .arg("-vsync").arg("cfr")
-        .arg("-g").arg("30") // GOP size = framerate for consistent keyframes
+        .arg("-g").arg("15") // GOP size = framerate for consistent keyframes
         .arg("-bf").arg("0") // No B-frames for simpler decode
         // Web-optimized MP4 container
         .arg("-movflags").arg("+faststart") // Move moov atom to beginning for web streaming
@@ -1006,12 +1077,12 @@ fn start_recording(options: StartRecordingOptions, state: State<RecordingState>)
             .map(|s| s.audio_quality.as_str())
             .unwrap_or("standard");
 
-        // Set bitrate based on quality
+        // Set bitrate based on quality (increased for better audio quality and less crackling)
         let bitrate = match audio_quality {
-            "voice" => "64k",
-            "standard" => "128k",
-            "high" => "256k",
-            _ => "128k",
+            "voice" => "96k",     // Increased from 64k
+            "standard" => "192k", // Increased from 128k (test 4 winner!)
+            "high" => "256k",     // Unchanged
+            _ => "192k",          // Default to standard
         };
 
         // Check if we're mixing dual audio (mic + system) or doing video overlay (combo mode)
@@ -1022,20 +1093,20 @@ fn start_recording(options: StartRecordingOptions, state: State<RecordingState>)
 
             // Create picture-in-picture effect: webcam in bottom-right corner
             // Use fps filter and setpts to ensure smooth, synchronized playback
-            // Scale screen to 1920x1080, scale webcam to 320x180, overlay at bottom-right with 20px margin
-            let video_filter = "[0:v]fps=30,setpts=PTS-STARTPTS,scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2[screen];\
-                               [1:v]fps=30,setpts=PTS-STARTPTS,scale=320:180:force_original_aspect_ratio=decrease:force_divisible_by=2[webcam];\
+            // Scale screen to 1280x720 (720p), scale webcam to 213x120, overlay at bottom-right with 20px margin
+            let video_filter = "[0:v]fps=15,setpts=PTS-STARTPTS,scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2[screen];\
+                               [1:v]fps=15,setpts=PTS-STARTPTS,scale=213:120:force_original_aspect_ratio=decrease:force_divisible_by=2[webcam];\
                                [screen][webcam]overlay=W-w-20:H-h-20:shortest=1[vout]";
 
             if mic_enabled && sys_audio_enabled {
-                // Both audio sources: mix them with timestamp sync
-                // Reset audio timestamps to match video, then mix the streams
-                let filter = format!("{};[2:a]asetpts=PTS-STARTPTS[a1];[3:a]asetpts=PTS-STARTPTS[a2];[a1][a2]amix=inputs=2:duration=first[aout]", video_filter);
+                // Both audio sources: mix them with simple timestamp normalization
+                // Using asetpts instead of aresample to avoid resampling overhead
+                let filter = format!("{};[2:a]asetpts=PTS-STARTPTS[a1];[3:a]asetpts=PTS-STARTPTS[a2];[a1][a2]amix=inputs=2:duration=first:dropout_transition=2[aout]", video_filter);
                 cmd.arg("-filter_complex").arg(&filter)
                     .arg("-map").arg("[vout]")    // Overlayed video
                     .arg("-map").arg("[aout]");   // Mixed audio
             } else if mic_enabled || sys_audio_enabled {
-                // Single audio source - reset timestamps to sync with video
+                // Single audio source - simple timestamp normalization
                 let filter = format!("{};[2:a]asetpts=PTS-STARTPTS[aout]", video_filter);
                 cmd.arg("-filter_complex").arg(&filter)
                     .arg("-map").arg("[vout]")    // Overlayed video
@@ -1046,23 +1117,34 @@ fn start_recording(options: StartRecordingOptions, state: State<RecordingState>)
                     .arg("-map").arg("[vout]");   // Overlayed video only
             }
         } else if options.mode == "screen" && mic_enabled && sys_audio_enabled {
-            // Screen mode with dual audio mixing: merge mic (input 1) + system (input 2)
-            // Use amerge filter to combine both audio streams
+            // Screen mode with dual audio mixing: mix mic (input 1) + system (input 2)
+            // Using asetpts instead of aresample to avoid resampling overhead
             cmd.arg("-filter_complex")
-                .arg("[1:a][2:a]amerge=inputs=2[aout]")
+                .arg("[1:a]asetpts=PTS-STARTPTS[a1];[2:a]asetpts=PTS-STARTPTS[a2];[a1][a2]amix=inputs=2:duration=first:dropout_transition=2[aout]")
                 .arg("-map").arg("0:v")  // Video from input 0 (screen)
                 .arg("-map").arg("[aout]"); // Mixed audio output
         }
 
+        // Audio encoding settings (optimized for quality and reduced crackling)
         cmd.arg("-c:a").arg("aac")
             .arg("-b:a").arg(bitrate)
-            .arg("-ar").arg("48000");
+            .arg("-profile:a").arg("aac_low")  // AAC-LC profile for better quality
+            .arg("-ar").arg("48000")
+            .arg("-ac").arg("2"); // Stereo output
+
+        // For simple captures (no filter_complex), add simple timestamp normalization
+        // Using asetpts instead of aresample to avoid resampling overhead
+        #[cfg(target_os = "macos")]
+        if options.mode != "combo" && !(options.mode == "screen" && mic_enabled && sys_audio_enabled) {
+            // Only add audio filter if we're not already using filter_complex
+            cmd.arg("-af").arg("asetpts=PTS-STARTPTS");
+        }
     }
 
     cmd.arg("-y")
         .arg(&options.output_path)
         .stdout(Stdio::null())
-        .stderr(Stdio::piped()); // Capture stderr to see errors
+        .stderr(Stdio::piped()); // Capture stderr for diagnostics
 
     log::info!("Starting FFmpeg process: {:?}", cmd);
 
@@ -1070,21 +1152,34 @@ fn start_recording(options: StartRecordingOptions, state: State<RecordingState>)
         format!("Failed to start FFmpeg recording: {}. Make sure FFmpeg is installed.", e)
     })?;
 
+    // Capture stderr for continuous monitoring
+    if let Some(stderr) = child.stderr.take() {
+        // Spawn a thread to read and log FFmpeg output
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                if let Ok(line) = line {
+                    // Log important messages
+                    if line.contains("drop") || line.contains("discontinuity") ||
+                       line.contains("buffer") || line.contains("queue") ||
+                       line.contains("audio") || line.contains("overrun") ||
+                       line.contains("underrun") || line.contains("pts") {
+                        log::warn!("[FFmpeg Audio] {}", line);
+                    }
+                    // Also log at debug level for full capture
+                    log::debug!("[FFmpeg] {}", line);
+                }
+            }
+        });
+    }
+
     // Give FFmpeg a moment to start and validate inputs
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     // Check if the process is still running (didn't immediately fail)
     match child.try_wait() {
         Ok(Some(status)) => {
-            // Process already exited - this is an error
-            let stderr = child.stderr.take();
-            if let Some(mut stderr) = stderr {
-                use std::io::Read;
-                let mut error_msg = String::new();
-                let _ = stderr.read_to_string(&mut error_msg);
-                log::error!("FFmpeg failed immediately: {}", error_msg);
-                return Err(format!("FFmpeg failed to start recording. Error: {}", error_msg));
-            }
             return Err(format!("FFmpeg exited immediately with status: {}", status));
         }
         Ok(None) => {
@@ -1172,6 +1267,192 @@ fn stop_recording(state: State<RecordingState>) -> Result<String, String> {
     } else {
         Err("No active recording".to_string())
     }
+}
+
+#[tauri::command]
+fn start_test_recording(options: StartTestRecordingOptions, state: State<RecordingState>) -> Result<String, String> {
+    log::info!("Starting test recording with custom settings: {:?}", options);
+
+    let mut recording_process = state.process.lock().unwrap();
+    if recording_process.is_some() {
+        return Err("Recording already in progress".to_string());
+    }
+
+    // Build FFmpeg command with test settings
+    let ffmpeg = find_ffmpeg();
+    let mut cmd = Command::new(&ffmpeg);
+
+    // Apply test settings for buffer and logging
+    cmd.arg("-loglevel").arg("verbose")
+        .arg("-rtbufsize").arg(&options.test_settings.rtbufsize);
+
+    #[cfg(target_os = "macos")]
+    {
+        // Get audio settings
+        let audio_settings = options.audio_settings.as_ref();
+        let mic_enabled = audio_settings.map(|s| s.microphone_enabled).unwrap_or(true);
+        let mic_device = audio_settings
+            .and_then(|s| {
+                if s.microphone_device == "default" {
+                    Some("0")
+                } else {
+                    Some(s.microphone_device.as_str())
+                }
+            })
+            .unwrap_or("0");
+
+        // Screen capture with test settings
+        if options.mode == "screen" {
+            cmd.arg("-f").arg("avfoundation")
+                .arg("-capture_cursor").arg("1")
+                .arg("-framerate").arg("30");
+
+            // Apply wallclock timestamp test setting
+            if options.test_settings.use_wallclock_as_timestamps {
+                cmd.arg("-use_wallclock_as_timestamps").arg("1");
+            }
+
+            // Input
+            if mic_enabled {
+                cmd.arg("-i").arg(&format!("1:{}", mic_device));
+            } else {
+                cmd.arg("-i").arg("1:none");
+            }
+        }
+
+        // Thread queue size
+        cmd.arg("-thread_queue_size").arg(options.test_settings.thread_queue_size.to_string());
+
+        // Video encoding
+        cmd.arg("-c:v").arg("libx264")
+            .arg("-preset").arg("ultrafast")
+            .arg("-pix_fmt").arg("yuv420p");
+
+        // Audio encoding
+        cmd.arg("-c:a").arg("aac")
+            .arg("-b:a").arg("128k")
+            .arg("-ar").arg("48000")
+            .arg("-ac").arg("2");
+
+        // Apply audio filter test setting if provided
+        if !options.test_settings.audio_filter.is_empty() && mic_enabled {
+            cmd.arg("-af").arg(&options.test_settings.audio_filter);
+        }
+    }
+
+    cmd.arg("-y")
+        .arg(&options.output_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    log::info!("Starting test recording FFmpeg process: {:?}", cmd);
+
+    let mut child = cmd.spawn().map_err(|e| {
+        format!("Failed to start test recording: {}. Make sure FFmpeg is installed.", e)
+    })?;
+
+    // Capture stderr for monitoring
+    if let Some(stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                if let Ok(line) = line {
+                    if line.contains("drop") || line.contains("discontinuity") ||
+                       line.contains("buffer") || line.contains("queue") ||
+                       line.contains("audio") || line.contains("overrun") ||
+                       line.contains("underrun") || line.contains("pts") {
+                        log::warn!("[FFmpeg Test] {}", line);
+                    }
+                    log::debug!("[FFmpeg Test] {}", line);
+                }
+            }
+        });
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            return Err(format!("FFmpeg test recording exited immediately with status: {}", status));
+        }
+        Ok(None) => {
+            log::info!("Test recording started successfully");
+        }
+        Err(e) => {
+            log::warn!("Could not check FFmpeg test status: {}", e);
+        }
+    }
+
+    *recording_process = Some(child);
+    Ok(options.output_path)
+}
+
+// New ScreenCaptureKit-based recording (macOS only)
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn start_screencapturekit_recording(
+    output_path: String,
+    duration: f64,
+    audio_enabled: bool,
+    state: State<RecordingState>
+) -> Result<String, String> {
+    log::info!("Starting ScreenCaptureKit recording: path={}, duration={}, audio={}",
+               output_path, duration, audio_enabled);
+
+    let mut recording_process = state.process.lock().unwrap();
+    if recording_process.is_some() {
+        return Err("Recording already in progress".to_string());
+    }
+
+    let screen_recorder = find_screen_recorder();
+    if !screen_recorder.exists() {
+        log::error!("ScreenRecorder binary not found at: {:?}", screen_recorder);
+        return Err("ScreenRecorder binary not found. Please rebuild the application.".to_string());
+    }
+
+    log::info!("Using ScreenRecorder at: {:?}", screen_recorder);
+
+    // Build command: ScreenRecorder <output_path> <display_id> <audio> <duration>
+    let mut cmd = Command::new(&screen_recorder);
+    cmd.arg(&output_path)
+        .arg("0")  // Display 0 (main display)
+        .arg(if audio_enabled { "true" } else { "false" })
+        .arg(duration.to_string())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    log::info!("Starting ScreenRecorder process...");
+
+    let mut child = cmd.spawn().map_err(|e| {
+        log::error!("Failed to spawn ScreenRecorder: {}", e);
+        format!("Failed to start ScreenRecorder: {}", e)
+    })?;
+
+    // Log output in background thread
+    if let Some(stdout) = child.stdout.take() {
+        use std::io::{BufRead, BufReader};
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines().flatten() {
+                log::info!("[ScreenRecorder] {}", line);
+            }
+        });
+    }
+
+    if let Some(stderr) = child.stderr.take() {
+        use std::io::{BufRead, BufReader};
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines().flatten() {
+                log::info!("[ScreenRecorder] {}", line);
+            }
+        });
+    }
+
+    log::info!("ScreenRecorder started successfully");
+    *recording_process = Some(child);
+    Ok(output_path)
 }
 
 #[tauri::command]
@@ -1699,6 +1980,9 @@ pub fn run() {
       export_multi_clip_to_google_drive,
       start_recording,
       stop_recording,
+      start_test_recording,
+      #[cfg(target_os = "macos")]
+      start_screencapturekit_recording,
       open_in_native_player,
       list_audio_devices,
       transcribe_video,
