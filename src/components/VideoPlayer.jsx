@@ -4,7 +4,7 @@ import videojs from 'video.js';
 import 'video.js/dist/video-js.css';
 import './VideoPlayer.css';
 
-function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trimStart, trimEnd, audioSegments, isVideoMuted = false, isAudioMuted = false }) {
+function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trimStart, trimEnd, audioSegments, isVideoMuted = false, isAudioMuted = false, enableDiagnostics = false }) {
   const videoRef = useRef(null);
   const playerRef = useRef(null);
   const [playbackRate, setPlaybackRate] = useState(1.0);
@@ -128,6 +128,13 @@ function VideoPlayer({ videoPath, onTimeUpdate, currentTime, onVideoLoaded, trim
         gainNode.connect(audioContext.destination);
 
         console.log('[VideoPlayer] Web Audio API initialized');
+
+        // Expose AudioContext for diagnostics
+        if (enableDiagnostics && typeof window !== 'undefined') {
+          window.__syncDiagnosticsAudioContext = audioContext;
+          window.__syncDiagnosticsVideoElement = videoElement;
+          console.log('[VideoPlayer] Diagnostics mode enabled - AudioContext exposed to window');
+        }
       } catch (error) {
         console.error('[VideoPlayer] Failed to initialize Web Audio API:', error);
         // Fall back to regular video playback if Web Audio fails

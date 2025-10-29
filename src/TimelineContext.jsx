@@ -96,7 +96,8 @@ export function TimelineProvider({ children, clips }) {
         isAudioLinked: true,  // Audio and video are linked by default
         audioOffset: 0,  // Audio offset in seconds when unlinked
         isVideoMuted: false,  // Video is not muted by default
-        isAudioMuted: false  // Audio is not muted by default
+        isAudioMuted: false,  // Audio is not muted by default
+        textOverlay: null  // No text overlay by default
       };
 
       // Insert at specific index or add to end of timeline
@@ -390,7 +391,8 @@ export function TimelineProvider({ children, clips }) {
         isAudioLinked: originalClip.isAudioLinked,
         audioOffset: originalClip.audioOffset,
         isVideoMuted: originalClip.isVideoMuted,
-        isAudioMuted: originalClip.isAudioMuted
+        isAudioMuted: originalClip.isAudioMuted,
+        textOverlay: originalClip.textOverlay
       };
 
       const secondClip = {
@@ -405,7 +407,8 @@ export function TimelineProvider({ children, clips }) {
         isAudioLinked: originalClip.isAudioLinked,
         audioOffset: originalClip.audioOffset,
         isVideoMuted: originalClip.isVideoMuted,
-        isAudioMuted: originalClip.isAudioMuted
+        isAudioMuted: originalClip.isAudioMuted,
+        textOverlay: originalClip.textOverlay
       };
 
       // Replace the original clip with the two new clips
@@ -465,7 +468,8 @@ export function TimelineProvider({ children, clips }) {
         isAudioLinked: true, // Audio is linked (positioned at start of video)
         audioOffset: 0,
         isVideoMuted: originalClip.isVideoMuted,
-        isAudioMuted: originalClip.isAudioMuted
+        isAudioMuted: originalClip.isAudioMuted,
+        textOverlay: originalClip.textOverlay
       };
 
       // Second clip: NO video (zero duration), second part of audio
@@ -483,7 +487,8 @@ export function TimelineProvider({ children, clips }) {
         isAudioLinked: false, // Audio is UNLINKED so we can position it independently
         audioOffset: -(videoDuration) + removeEnd, // Position audio relative to where the video would be
         isVideoMuted: true, // Video is muted (though it has zero duration anyway)
-        isAudioMuted: originalClip.isAudioMuted
+        isAudioMuted: originalClip.isAudioMuted,
+        textOverlay: null // Audio-only clip doesn't need text overlay
       };
 
       // Replace the original clip with the two new clips
@@ -629,6 +634,19 @@ export function TimelineProvider({ children, clips }) {
     );
   }, []);
 
+  // Update text overlay for a timeline clip
+  const updateTextOverlay = useCallback((timelineClipId, textOverlay) => {
+    console.log('[TimelineContext] Updating text overlay for clip', timelineClipId, 'to:', textOverlay);
+
+    setTimelineClips(prev =>
+      prev.map(tc =>
+        tc.id === timelineClipId
+          ? { ...tc, textOverlay }
+          : tc
+      )
+    );
+  }, []);
+
   const value = {
     // State
     timelineClips,
@@ -655,7 +673,10 @@ export function TimelineProvider({ children, clips }) {
     toggleAudioLink,
     updateAudioOffset,
     toggleVideoMute,
-    toggleAudioMute
+    toggleAudioMute,
+
+    // Text overlay actions
+    updateTextOverlay
   };
 
   return (

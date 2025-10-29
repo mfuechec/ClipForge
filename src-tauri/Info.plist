@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSCameraUsageDescription</key>
+  <string>ClipForge needs access to your camera to record webcam video.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>ClipForge needs access to your microphone to record audio.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>ClipForge needs to record your screen for screen capture features.</string>
+</dict>
+</plist>

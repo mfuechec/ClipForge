@@ -798,7 +798,8 @@ function AppContent({ clips, setClips }) {
           is_video_muted: tc.isVideoMuted ?? false,
           is_audio_muted: tc.isAudioMuted ?? false,
           is_audio_linked: tc.isAudioLinked ?? true,
-          audio_offset: tc.audioOffset ?? 0
+          audio_offset: tc.audioOffset ?? 0,
+          text_overlay: tc.textOverlay ?? null
         };
       });
 
@@ -811,22 +812,32 @@ function AppContent({ clips, setClips }) {
 
       console.log('[App] Timeline merge successful:', result);
 
-      // Import the merged clip back into the library (defer waveform to speed up)
-      const metadata = await importClipWithWaveform(result, true);
+      // Try to import in background (with timeout to prevent hanging)
+      try {
+        // Import the merged clip back into the library (defer waveform to speed up)
+        const metadata = await Promise.race([
+          importClipWithWaveform(result, true),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Import timeout')), 5000))
+        ]);
 
-      // Add to clips array
-      const newClips = [...clips, metadata];
-      setClips(newClips);
+        // Add to clips array
+        const newClips = [...clips, metadata];
+        setClips(newClips);
 
-      // Clear the timeline and add the merged clip
-      clearTimeline();
+        // Clear the timeline and add the merged clip
+        clearTimeline();
 
-      // Wait a tick for state to update, then add the merged clip
-      setTimeout(() => {
-        addClipToTimeline(newClips.length - 1, null, newClips);
-      }, 0);
+        // Wait a tick for state to update, then add the merged clip
+        setTimeout(() => {
+          addClipToTimeline(newClips.length - 1, null, newClips);
+        }, 0);
 
-      console.log('[App] Merged clip added to timeline');
+        console.log('[App] Merged clip added to timeline');
+      } catch (importError) {
+        console.error('[App] Failed to import merged clip back to library:', importError);
+        // Still show success - the merge worked even if import failed
+        alert(`Merge successful! File saved to:\n${result}\n\nNote: Could not auto-import to library. You can import it manually if needed.`);
+      }
     } catch (error) {
       console.error('[App] Merge failed:', error);
       alert(`Merge failed: ${error}`);
@@ -880,7 +891,8 @@ function AppContent({ clips, setClips }) {
             is_video_muted: tc.isVideoMuted ?? false,
             is_audio_muted: tc.isAudioMuted ?? false,
             is_audio_linked: tc.isAudioLinked ?? true,
-            audio_offset: tc.audioOffset ?? 0
+            audio_offset: tc.audioOffset ?? 0,
+            text_overlay: tc.textOverlay ?? null
           };
         });
 
@@ -924,6 +936,8 @@ function AppContent({ clips, setClips }) {
       alert(`Export failed: ${error}`);
     } finally {
       setIsExporting(false);
+      // Clear progress modal after a brief delay so user can see completion
+      setTimeout(() => setMergeProgress(null), 1000);
     }
   };
 

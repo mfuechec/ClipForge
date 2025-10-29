@@ -49,6 +49,14 @@ fn find_ffprobe() -> String {
     "ffprobe".to_string()
 }
 
+// Helper function to escape text for FFmpeg drawtext filter
+fn escape_ffmpeg_text(text: &str) -> String {
+    text.replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace(":", "\\:")
+        .replace("%", "\\%")
+}
+
 // Helper function to round floating point values to 3 decimal places (milliseconds)
 // This avoids FFmpeg precision issues with timing values
 fn round_to_millis(value: f64) -> f64 {
@@ -454,6 +462,18 @@ fn export_video(options: ExportOptions) -> Result<String, String> {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct TextOverlay {
+    text: String,
+    x_position: String,  // e.g., "10", "(w-text_w)/2", etc.
+    y_position: String,  // e.g., "10", "h-th-10", etc.
+    font_size: u32,
+    font_color: String,  // e.g., "white"
+    box_enabled: bool,
+    box_color: Option<String>,  // e.g., "black@0.5"
+    box_border_width: Option<u32>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ClipSegment {
     input_path: String,
     trim_start: Option<f64>,
@@ -464,6 +484,7 @@ pub struct ClipSegment {
     is_audio_muted: Option<bool>,
     is_audio_linked: Option<bool>,
     audio_offset: Option<f64>,
+    text_overlay: Option<TextOverlay>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -494,17 +515,7 @@ fn export_multi_clip(options: MultiClipExportOptions, window: tauri::Window) -> 
         status: "Starting merge...".to_string(),
     });
 
-    // For a single clip, use the simple export path
-    if options.clips.len() == 1 {
-        let clip = &options.clips[0];
-        return export_video(ExportOptions {
-            input_path: clip.input_path.clone(),
-            output_path: options.output_path.clone(),
-            trim_start: clip.trim_start,
-            trim_end: clip.trim_end,
-        });
-    }
-
+    // Process all clips through the same path to support text overlays and other features
     // For multiple clips, we need to:
     // 1. Export each trimmed clip to a temp file
     // 2. Concat all temp files
@@ -611,21 +622,55 @@ fn export_multi_clip(options: MultiClipExportOptions, window: tauri::Window) -> 
         let mut needs_filter = has_independent_audio_trim;
 
         // Handle video
-        let video_filter = if is_video_muted {
+        let mut video_filter = if is_video_muted {
             needs_filter = true;
             let duration_str = format!("{:.3}", duration);
-            format!("color=c=black:s=1920x1080:d={},fps=30[v]", duration_str)
+            format!("color=c=black:s=1920x1080:d={},fps=30", duration_str)
         } else if has_independent_audio_trim {
             // Apply video trim using filter
             needs_filter = true;
             if let (Some(start), Some(end)) = (trim_start, trim_end) {
-                format!("[0:v]trim=start={}:end={},setpts=PTS-STARTPTS[v]", start, end)
+                format!("[0:v]trim=start={}:end={},setpts=PTS-STARTPTS", start, end)
             } else {
-                "[0:v]null[v]".to_string()
+                "[0:v]null".to_string()
             }
         } else {
-            "[0:v]null[v]".to_string()
+            "[0:v]null".to_string()
         };
+
+        // Add text overlay if present
+        if let Some(overlay) = &clip.text_overlay {
+            needs_filter = true;
+            let escaped_text = escape_ffmpeg_text(&overlay.text);
+
+            // Use system font (Helvetica on macOS)
+            let font_path = "/System/Library/Fonts/Supplemental/Arial.ttf";
+
+            let mut drawtext_params = format!(
+                "drawtext=text='{}':fontfile={}:fontsize={}:fontcolor={}:x={}:y={}",
+                escaped_text,
+                font_path,
+                overlay.font_size,
+                overlay.font_color,
+                overlay.x_position,
+                overlay.y_position
+            );
+
+            // Add box if enabled
+            if overlay.box_enabled {
+                drawtext_params.push_str(":box=1");
+                if let Some(ref box_color) = overlay.box_color {
+                    drawtext_params.push_str(&format!(":boxcolor={}", box_color));
+                }
+                if let Some(border_width) = overlay.box_border_width {
+                    drawtext_params.push_str(&format!(":boxborderw={}", border_width));
+                }
+            }
+
+            video_filter.push_str(&format!(",{}", drawtext_params));
+        }
+
+        video_filter.push_str("[v]");
         filter_parts.push(video_filter);
 
         // Handle audio

@@ -50,7 +50,7 @@ function RecordingControls({ onRecordingComplete }) {
 
       // Generate temporary file path - recording will be saved to temp location
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-      const tempFilename = `clipforge-${mode}-${timestamp}.mp4`;
+      const tempFilename = `clipforge-${mode}-${timestamp}.mov`;
 
       // Use system temp directory (cross-platform)
       const tempPath = `/tmp/${tempFilename}`; // macOS/Linux
@@ -59,6 +59,7 @@ function RecordingControls({ onRecordingComplete }) {
       recordingPathRef.current = tempPath;
 
       // Start recording via Rust backend with audio settings
+      // Note: Using FFmpeg for all modes
       await invoke('start_recording', {
         options: {
           mode,

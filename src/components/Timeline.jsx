@@ -3,6 +3,7 @@ import './Timeline.css';
 import { useDraggable, useDroppable } from '@dnd-kit/core';
 import { useTimeline } from '../TimelineContext';
 import { getSegmentColor } from './TranscriptPanel';
+import TextOverlayEditor from './TextOverlayEditor';
 
 // Draggable Timeline Clip Block
 function DraggableTimelineClip({
@@ -15,7 +16,8 @@ function DraggableTimelineClip({
   onTimelineClipSelect,
   isTrimMode,
   renamingClipId,
-  onRename
+  onRename,
+  onTextOverlayClick
 }) {
   const { toggleAudioLink, toggleVideoMute, toggleAudioMute } = useTimeline();
   const [renameValue, setRenameValue] = useState('');
@@ -143,6 +145,18 @@ function DraggableTimelineClip({
                   title={timelineClip.isAudioMuted ? "Unmute audio" : "Mute audio"}
                 >
                   {timelineClip.isAudioMuted ? '🔇' : '🔊'}
+                </button>
+                <button
+                  className={`clip-control-btn ${timelineClip.textOverlay ? 'active' : ''}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (onTextOverlayClick) {
+                      onTextOverlayClick(timelineClip.id);
+                    }
+                  }}
+                  title={timelineClip.textOverlay ? "Edit text overlay" : "Add text overlay"}
+                >
+                  T
                 </button>
               </div>
             )}
@@ -303,7 +317,31 @@ function Timeline({
   onCompleteRename,
   waveformsByPath = {}
 }) {
-  const { timelineClips, playheadTime, totalDuration } = useTimeline();
+  const { timelineClips, playheadTime, totalDuration, updateTextOverlay } = useTimeline();
+  const [textOverlayEditorOpen, setTextOverlayEditorOpen] = useState(false);
+  const [editingOverlayClipId, setEditingOverlayClipId] = useState(null);
+
+  const handleTextOverlayClick = (timelineClipId) => {
+    setEditingOverlayClipId(timelineClipId);
+    setTextOverlayEditorOpen(true);
+  };
+
+  const handleTextOverlaySave = (overlayData) => {
+    if (editingOverlayClipId) {
+      updateTextOverlay(editingOverlayClipId, overlayData);
+    }
+    setTextOverlayEditorOpen(false);
+    setEditingOverlayClipId(null);
+  };
+
+  const handleTextOverlayClose = () => {
+    setTextOverlayEditorOpen(false);
+    setEditingOverlayClipId(null);
+  };
+
+  const currentEditingClip = editingOverlayClipId
+    ? timelineClips.find(tc => tc.id === editingOverlayClipId)
+    : null;
 
   const formatTime = (seconds) => {
     if (!seconds && seconds !== 0) return '0:00';
@@ -344,7 +382,17 @@ function Timeline({
         renamingClipId={renamingClipId}
         onCompleteRename={onCompleteRename}
         waveformsByPath={waveformsByPath}
+        onTextOverlayClick={handleTextOverlayClick}
       />
+
+      {/* Text Overlay Editor Modal */}
+      {textOverlayEditorOpen && (
+        <TextOverlayEditor
+          overlay={currentEditingClip?.textOverlay}
+          onSave={handleTextOverlaySave}
+          onClose={handleTextOverlayClose}
+        />
+      )}
     </div>
   );
 }
@@ -372,7 +420,8 @@ function TimelineTrackDroppable({
   onSegmentSelect,
   renamingClipId,
   onCompleteRename,
-  waveformsByPath
+  waveformsByPath,
+  onTextOverlayClick
 }) {
   const { setNodeRef, isOver } = useDroppable({
     id: 'timeline-track'
@@ -499,6 +548,7 @@ function TimelineTrackDroppable({
                   isTrimMode={isTrimMode}
                   renamingClipId={renamingClipId}
                   onRename={onCompleteRename}
+                  onTextOverlayClick={onTextOverlayClick}
                 />
               );
             })}
