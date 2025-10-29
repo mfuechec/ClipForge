@@ -676,10 +676,10 @@ fn export_multi_clip(options: MultiClipExportOptions, window: tauri::Window) -> 
         // Handle audio
         let audio_filter = if !has_audio || is_audio_muted {
             // No audio stream or audio is muted - generate silent audio
+            // Don't specify duration - let -shortest flag stop when video ends
             needs_filter = true;
-            let duration_str = format!("{:.3}", duration);
-            log::info!("Clip {} generating silent audio with duration: {} (formatted as {})", i, duration, duration_str);
-            format!("anullsrc=channel_layout=stereo:sample_rate=44100:duration={}[a]", duration_str)
+            log::info!("Clip {} generating silent audio (infinite, will stop with -shortest)", i);
+            "anullsrc=channel_layout=stereo:sample_rate=44100[a]".to_string()
         } else if has_independent_audio_trim {
             // Apply audio-specific trim
             needs_filter = true;
@@ -717,8 +717,9 @@ fn export_multi_clip(options: MultiClipExportOptions, window: tauri::Window) -> 
             "[0:a]anull[a]".to_string()
         } else {
             // Fallback: generate silent audio
+            // Don't specify duration - let -shortest flag stop when video ends
             needs_filter = true;
-            format!("anullsrc=channel_layout=stereo:sample_rate=44100:duration={}[a]", duration)
+            "anullsrc=channel_layout=stereo:sample_rate=44100[a]".to_string()
         };
         filter_parts.push(audio_filter);
 
@@ -743,6 +744,7 @@ fn export_multi_clip(options: MultiClipExportOptions, window: tauri::Window) -> 
             .arg("-crf").arg("23")
             .arg("-c:a").arg("aac")
             .arg("-b:a").arg("128k")
+            .arg("-shortest")  // Stop when the shortest stream ends (prevents audio/video sync issues)
             .arg("-y")
             .arg(&temp_path);
 
@@ -790,21 +792,6 @@ fn export_multi_clip(options: MultiClipExportOptions, window: tauri::Window) -> 
         temp_files.push(temp_path);
     }
 
-    // Step 2: Create concat file
-    let concat_file_path = temp_dir.join("clipforge_concat.txt");
-    let mut concat_file = File::create(&concat_file_path).map_err(|e| {
-        format!("Failed to create concat file: {}", e)
-    })?;
-
-    for temp_file in &temp_files {
-        writeln!(concat_file, "file '{}'", temp_file.to_string_lossy()).map_err(|e| {
-            format!("Failed to write to concat file: {}", e)
-        })?;
-    }
-    drop(concat_file); // Close the file
-
-    log::info!("Created concat file: {:?}", concat_file_path);
-
     // Emit progress for concatenation step
     let _ = window.emit("merge-progress", MergeProgress {
         current: options.clips.len(),
@@ -812,14 +799,70 @@ fn export_multi_clip(options: MultiClipExportOptions, window: tauri::Window) -> 
         status: "Merging clips together...".to_string(),
     });
 
-    // Step 3: Concat all clips
+    // Step 2: Probe all temp files to get their resolutions
+    let ffprobe = find_ffprobe();
+    let mut max_width = 0;
+    let mut max_height = 0;
+
+    for temp_file in &temp_files {
+        let probe_output = Command::new(&ffprobe)
+            .arg("-v").arg("error")
+            .arg("-select_streams").arg("v:0")
+            .arg("-show_entries").arg("stream=width,height")
+            .arg("-of").arg("csv=p=0")
+            .arg(temp_file)
+            .output()
+            .map_err(|e| format!("Failed to probe temp file: {}", e))?;
+
+        let dimensions = String::from_utf8_lossy(&probe_output.stdout);
+        let parts: Vec<&str> = dimensions.trim().split(',').collect();
+        if parts.len() == 2 {
+            let width: u32 = parts[0].parse().unwrap_or(1920);
+            let height: u32 = parts[1].parse().unwrap_or(1080);
+            max_width = max_width.max(width);
+            max_height = max_height.max(height);
+        }
+    }
+
+    log::info!("Target resolution for concat: {}x{}", max_width, max_height);
+
+    // Step 3: Concat using filter_complex with scaling/padding for different resolutions
     let ffmpeg = find_ffmpeg();
     let mut concat_cmd = Command::new(&ffmpeg);
+
+    // Add all temp files as inputs
+    for temp_file in &temp_files {
+        concat_cmd.arg("-i").arg(temp_file);
+    }
+
+    // Build filter_complex for concatenation with scale and pad
+    let num_clips = temp_files.len();
+    let mut filter_str = String::new();
+
+    // Scale and pad each input to the target resolution
+    for i in 0..num_clips {
+        filter_str.push_str(&format!(
+            "[{}:v]scale=w={}:h={}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black[v{}];",
+            i, max_width, max_height, max_width, max_height, i
+        ));
+    }
+
+    // Concatenate the normalized videos with their audio
+    for i in 0..num_clips {
+        filter_str.push_str(&format!("[v{}][{}:a]", i, i));
+    }
+    filter_str.push_str(&format!("concat=n={}:v=1:a=1[outv][outa]", num_clips));
+
     concat_cmd
-        .arg("-f").arg("concat")
-        .arg("-safe").arg("0")
-        .arg("-i").arg(&concat_file_path)
-        .arg("-c").arg("copy") // Copy without re-encoding
+        .arg("-filter_complex").arg(&filter_str)
+        .arg("-map").arg("[outv]")
+        .arg("-map").arg("[outa]")
+        // Re-encode to fix timestamp discontinuities between clips
+        .arg("-c:v").arg("libx264")
+        .arg("-preset").arg("medium")  // Better quality for final output
+        .arg("-crf").arg("18")  // High quality
+        .arg("-c:a").arg("aac")
+        .arg("-b:a").arg("192k")
         .arg("-y")
         .arg(&options.output_path);
 
@@ -833,7 +876,6 @@ fn export_multi_clip(options: MultiClipExportOptions, window: tauri::Window) -> 
     for temp_file in &temp_files {
         let _ = std::fs::remove_file(temp_file);
     }
-    let _ = std::fs::remove_file(&concat_file_path);
 
     if !concat_output.status.success() {
         let stderr = String::from_utf8_lossy(&concat_output.stderr);
