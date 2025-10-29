@@ -71,6 +71,7 @@ function AppContent({ clips, setClips }) {
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [exportSuccessData, setExportSuccessData] = useState({ link: '', filename: '' });
+  const [mergeProgress, setMergeProgress] = useState(null); // { current: 0, total: 0, status: '' }
 
   // Save API key to localStorage when it changes
   useEffect(() => {
@@ -78,6 +79,24 @@ function AppContent({ clips, setClips }) {
       localStorage.setItem('googleDriveApiKey', googleDriveApiKey);
     }
   }, [googleDriveApiKey]);
+
+  // Listen for merge progress events from Rust backend
+  useEffect(() => {
+    const setupListener = async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      const unlisten = await listen('merge-progress', (event) => {
+        console.log('[App] Merge progress:', event.payload);
+        setMergeProgress(event.payload);
+      });
+      return unlisten;
+    };
+
+    let unlistenPromise = setupListener();
+
+    return () => {
+      unlistenPromise.then(unlisten => unlisten());
+    };
+  }, []);
 
   // Close export dropdown when clicking outside
   useEffect(() => {
@@ -197,20 +216,33 @@ function AppContent({ clips, setClips }) {
   };
 
   // Helper function to import a clip and generate its waveform
-  const importClipWithWaveform = async (path) => {
+  const importClipWithWaveform = async (path, deferWaveform = false) => {
     console.log('[App] Importing video from path:', path);
     const metadata = await invoke('import_video', { path });
     console.log('[App] Received metadata:', metadata);
 
-    // Generate waveform asynchronously (don't block on this)
-    try {
-      console.log('[App] Generating waveform for:', path);
-      const waveform = await invoke('generate_waveform', { videoPath: path, samples: 200 });
-      console.log('[App] Waveform generated with', waveform.length, 'samples');
-      setWaveformsByPath(prev => ({ ...prev, [path]: waveform }));
-    } catch (error) {
-      console.warn('[App] Failed to generate waveform:', error);
-      // Not critical - continue without waveform
+    if (deferWaveform) {
+      // Generate waveform in the background without blocking
+      console.log('[App] Deferring waveform generation for:', path);
+      invoke('generate_waveform', { videoPath: path, samples: 200 })
+        .then(waveform => {
+          console.log('[App] Waveform generated with', waveform.length, 'samples');
+          setWaveformsByPath(prev => ({ ...prev, [path]: waveform }));
+        })
+        .catch(error => {
+          console.warn('[App] Failed to generate waveform:', error);
+        });
+    } else {
+      // Generate waveform synchronously (wait for it)
+      try {
+        console.log('[App] Generating waveform for:', path);
+        const waveform = await invoke('generate_waveform', { videoPath: path, samples: 200 });
+        console.log('[App] Waveform generated with', waveform.length, 'samples');
+        setWaveformsByPath(prev => ({ ...prev, [path]: waveform }));
+      } catch (error) {
+        console.warn('[App] Failed to generate waveform:', error);
+        // Not critical - continue without waveform
+      }
     }
 
     return metadata;
@@ -474,8 +506,8 @@ function AppContent({ clips, setClips }) {
 
       console.log('[App] Extraction successful:', result);
 
-      // Import the extracted clip back into the library
-      const metadata = await importClipWithWaveform(result);
+      // Import the extracted clip back into the library (defer waveform to speed up)
+      const metadata = await importClipWithWaveform(result, true);
       setClips([...clips, metadata]);
       console.log(`[App] Clip extracted successfully! Duration: ${duration.toFixed(2)}s - Added to media library`);
     } catch (error) {
@@ -727,6 +759,7 @@ function AppContent({ clips, setClips }) {
 
     try {
       setIsExporting(true);
+      setMergeProgress({ current: 0, total: timelineClips.length, status: 'Preparing merge...' });
 
       // Generate output filename based on clip names
       const firstTimelineClip = timelineClips[0];
@@ -778,8 +811,8 @@ function AppContent({ clips, setClips }) {
 
       console.log('[App] Timeline merge successful:', result);
 
-      // Import the merged clip back into the library
-      const metadata = await importClipWithWaveform(result);
+      // Import the merged clip back into the library (defer waveform to speed up)
+      const metadata = await importClipWithWaveform(result, true);
 
       // Add to clips array
       const newClips = [...clips, metadata];
@@ -799,6 +832,8 @@ function AppContent({ clips, setClips }) {
       alert(`Merge failed: ${error}`);
     } finally {
       setIsExporting(false);
+      // Clear progress after a brief delay so user can see completion
+      setTimeout(() => setMergeProgress(null), 1000);
     }
   };
 
@@ -1406,6 +1441,85 @@ function AppContent({ clips, setClips }) {
         </div>
       )}
 
+      {/* Merge Progress Modal */}
+      {mergeProgress && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.8)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 2000
+        }}>
+          <div style={{
+            backgroundColor: '#2a2a2a',
+            padding: '40px',
+            borderRadius: '12px',
+            maxWidth: '500px',
+            width: '90%',
+            boxShadow: '0 10px 40px rgba(0,0,0,0.5)',
+            textAlign: 'center'
+          }}>
+            {/* Spinner */}
+            <div style={{
+              width: '60px',
+              height: '60px',
+              border: '4px solid #444',
+              borderTop: '4px solid #4a9eff',
+              borderRadius: '50%',
+              margin: '0 auto 20px',
+              animation: 'spin 1s linear infinite'
+            }}></div>
+
+            <h2 style={{
+              marginTop: 0,
+              marginBottom: '15px',
+              color: 'white',
+              fontSize: '24px'
+            }}>
+              Merging Timeline
+            </h2>
+
+            <p style={{
+              color: '#aaa',
+              fontSize: '15px',
+              marginBottom: '20px'
+            }}>
+              {mergeProgress.status}
+            </p>
+
+            {/* Progress Bar */}
+            <div style={{
+              width: '100%',
+              height: '8px',
+              backgroundColor: '#444',
+              borderRadius: '4px',
+              overflow: 'hidden',
+              marginBottom: '10px'
+            }}>
+              <div style={{
+                width: `${(mergeProgress.current / mergeProgress.total) * 100}%`,
+                height: '100%',
+                backgroundColor: '#4a9eff',
+                transition: 'width 0.3s ease'
+              }}></div>
+            </div>
+
+            <p style={{
+              color: '#888',
+              fontSize: '13px',
+              margin: 0
+            }}>
+              {mergeProgress.current} / {mergeProgress.total} clips processed
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Export Success Modal */}
       {showSuccessModal && (
         <div
@@ -1541,6 +1655,7 @@ function AppContent({ clips, setClips }) {
             audioSegments={playingAudioSegments}
             isVideoMuted={playingIsVideoMuted}
             isAudioMuted={playingIsAudioMuted}
+            enableDiagnostics={import.meta.env.DEV}
           />
         </div>
       </div>

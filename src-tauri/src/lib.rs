@@ -4,7 +4,7 @@ use std::process::{Command, Child, Stdio};
 use std::fs::File;
 use std::io::Write;
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{Emitter, State};
 
 // Native video player module removed - using video.js in frontend instead
 // mod video_player;
@@ -47,6 +47,12 @@ fn find_ffprobe() -> String {
 
     log::warn!("FFprobe not found in common locations, falling back to 'ffprobe'");
     "ffprobe".to_string()
+}
+
+// Helper function to round floating point values to 3 decimal places (milliseconds)
+// This avoids FFmpeg precision issues with timing values
+fn round_to_millis(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
 }
 
 // Helper function to find ScreenRecorder Swift helper
@@ -255,8 +261,35 @@ fn generate_waveform(video_path: String, samples: Option<usize>) -> Result<Vec<f
     let num_samples = samples.unwrap_or(200);
     log::info!("Generating waveform for: {} with {} samples", video_path, num_samples);
 
-    // First, get the duration of the video
+    // First, check if the video has an audio stream
     let ffprobe = find_ffprobe();
+    let probe_output = Command::new(&ffprobe)
+        .args(&[
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_streams",
+            "-select_streams", "a",  // Only select audio streams
+            &video_path
+        ])
+        .output()
+        .map_err(|e| format!("Failed to probe video: {}", e))?;
+
+    let json_str = String::from_utf8_lossy(&probe_output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&json_str)
+        .map_err(|e| format!("Failed to parse ffprobe output: {}", e))?;
+
+    // Check if there are any audio streams
+    let audio_streams = json["streams"].as_array()
+        .map(|arr| arr.len())
+        .unwrap_or(0);
+
+    if audio_streams == 0 {
+        log::info!("No audio stream found in video, returning silent waveform");
+        // Return silent waveform (all zeros)
+        return Ok(vec![0.0; num_samples]);
+    }
+
+    // Get the duration of the video
     let probe_output = Command::new(&ffprobe)
         .arg("-v").arg("error")
         .arg("-show_entries").arg("format=duration")
@@ -357,6 +390,27 @@ fn export_video(options: ExportOptions) -> Result<String, String> {
         return Err("Input file does not exist".to_string());
     }
 
+    // Check if input has an audio stream
+    let ffprobe = find_ffprobe();
+    let probe_output = Command::new(&ffprobe)
+        .args(&[
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_streams",
+            "-select_streams", "a",
+            &options.input_path
+        ])
+        .output()
+        .map_err(|e| format!("Failed to probe input: {}", e))?;
+
+    let json_str = String::from_utf8_lossy(&probe_output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&json_str)
+        .unwrap_or(serde_json::json!({"streams": []}));
+
+    let has_audio = json["streams"].as_array()
+        .map(|arr| !arr.is_empty())
+        .unwrap_or(false);
+
     // Build FFmpeg command
     let ffmpeg = find_ffmpeg();
     let mut cmd = Command::new(&ffmpeg);
@@ -372,10 +426,14 @@ fn export_video(options: ExportOptions) -> Result<String, String> {
     // Output options
     cmd.arg("-c:v").arg("libx264")
         .arg("-preset").arg("fast")
-        .arg("-crf").arg("23")
-        .arg("-c:a").arg("aac")
-        .arg("-b:a").arg("128k")
-        .arg("-y") // Overwrite output file
+        .arg("-crf").arg("23");
+
+    if has_audio {
+        cmd.arg("-c:a").arg("aac")
+            .arg("-b:a").arg("128k");
+    }
+
+    cmd.arg("-y") // Overwrite output file
         .arg(&options.output_path);
 
     log::info!("Running FFmpeg command: {:?}", cmd);
@@ -414,13 +472,27 @@ pub struct MultiClipExportOptions {
     output_path: String,
 }
 
+#[derive(Clone, serde::Serialize)]
+struct MergeProgress {
+    current: usize,
+    total: usize,
+    status: String,
+}
+
 #[tauri::command]
-fn export_multi_clip(options: MultiClipExportOptions) -> Result<String, String> {
+fn export_multi_clip(options: MultiClipExportOptions, window: tauri::Window) -> Result<String, String> {
     log::info!("Starting multi-clip export with {} clips", options.clips.len());
 
     if options.clips.is_empty() {
         return Err("No clips to export".to_string());
     }
+
+    // Emit initial progress
+    let _ = window.emit("merge-progress", MergeProgress {
+        current: 0,
+        total: options.clips.len(),
+        status: "Starting merge...".to_string(),
+    });
 
     // For a single clip, use the simple export path
     if options.clips.len() == 1 {
@@ -443,9 +515,45 @@ fn export_multi_clip(options: MultiClipExportOptions) -> Result<String, String> 
 
     // Step 1: Export each clip with trim applied and handle audio/video separation
     for (i, clip) in options.clips.iter().enumerate() {
+        // Emit progress for current clip
+        let _ = window.emit("merge-progress", MergeProgress {
+            current: i + 1,
+            total: options.clips.len(),
+            status: format!("Processing clip {} of {}...", i + 1, options.clips.len()),
+        });
+
         let temp_path = temp_dir.join(format!("clipforge_temp_{}.mp4", i));
 
         log::info!("Exporting clip {} to temp file: {:?}", i, temp_path);
+
+        // Round trim values to 3 decimal places to avoid ffmpeg precision issues
+        let trim_start = clip.trim_start.map(round_to_millis);
+        let trim_end = clip.trim_end.map(round_to_millis);
+        let audio_trim_start = clip.audio_trim_start.or(trim_start).map(round_to_millis);
+        let audio_trim_end = clip.audio_trim_end.or(trim_end).map(round_to_millis);
+
+        // Check if input has an audio stream
+        let ffprobe = find_ffprobe();
+        let probe_output = Command::new(&ffprobe)
+            .args(&[
+                "-v", "quiet",
+                "-print_format", "json",
+                "-show_streams",
+                "-select_streams", "a",
+                &clip.input_path
+            ])
+            .output()
+            .map_err(|e| format!("Failed to probe clip {}: {}", i, e))?;
+
+        let json_str = String::from_utf8_lossy(&probe_output.stdout);
+        let json: serde_json::Value = serde_json::from_str(&json_str)
+            .unwrap_or(serde_json::json!({"streams": []}));
+
+        let has_audio = json["streams"].as_array()
+            .map(|arr| !arr.is_empty())
+            .unwrap_or(false);
+
+        log::info!("Clip {} has audio: {}", i, has_audio);
 
         let ffmpeg = find_ffmpeg();
         let mut cmd = Command::new(&ffmpeg);
@@ -457,23 +565,27 @@ fn export_multi_clip(options: MultiClipExportOptions) -> Result<String, String> 
         let audio_offset = clip.audio_offset.unwrap_or(0.0);
 
         // Check if audio trim is different from video trim
-        let audio_trim_start = clip.audio_trim_start.or(clip.trim_start);
-        let audio_trim_end = clip.audio_trim_end.or(clip.trim_end);
-        let has_independent_audio_trim = audio_trim_start != clip.trim_start || audio_trim_end != clip.trim_end;
+        let has_independent_audio_trim = audio_trim_start != trim_start || audio_trim_end != trim_end;
 
         // Add trim parameters for video (if audio trim is independent, we'll handle it with filters)
         if !has_independent_audio_trim {
             // Audio and video trim are the same, apply trim to entire file
-            if let (Some(start), Some(end)) = (clip.trim_start, clip.trim_end) {
-                let duration = end - start;
+            if let (Some(start), Some(end)) = (trim_start, trim_end) {
+                let raw_duration = end - start;
+                // Round duration to avoid floating point precision issues
+                let duration = round_to_millis(raw_duration);
                 cmd.arg("-ss").arg(start.to_string());
                 cmd.arg("-t").arg(duration.to_string());
             }
         }
 
-        // Calculate clip duration for generating placeholders
-        let duration = if let (Some(start), Some(end)) = (clip.trim_start, clip.trim_end) {
-            end - start
+        // Calculate clip duration for generating placeholders (already rounded from trim values)
+        let duration = if let (Some(start), Some(end)) = (trim_start, trim_end) {
+            let raw_duration = end - start;
+            // Round duration to avoid floating point precision issues
+            let rounded = round_to_millis(raw_duration);
+            log::info!("Clip {} duration: raw={}, start={}, end={}, rounded={}", i, raw_duration, start, end, rounded);
+            rounded
         } else {
             // Use ffprobe to get duration if not trimmed
             let ffprobe = find_ffprobe();
@@ -485,10 +597,13 @@ fn export_multi_clip(options: MultiClipExportOptions) -> Result<String, String> 
                 .output()
                 .map_err(|e| format!("Failed to probe clip {}: {}", i, e))?;
 
-            String::from_utf8_lossy(&probe_output.stdout)
+            let parsed_duration = String::from_utf8_lossy(&probe_output.stdout)
                 .trim()
                 .parse::<f64>()
-                .unwrap_or(0.0)
+                .unwrap_or(0.0);
+            let rounded = round_to_millis(parsed_duration);
+            log::info!("Clip {} duration from ffprobe: raw={}, rounded={}", i, parsed_duration, rounded);
+            rounded
         };
 
         // Build filter complex for handling muted tracks, audio offset, and independent audio trim
@@ -498,11 +613,12 @@ fn export_multi_clip(options: MultiClipExportOptions) -> Result<String, String> 
         // Handle video
         let video_filter = if is_video_muted {
             needs_filter = true;
-            format!("color=c=black:s=1920x1080:d={},fps=30[v]", duration)
+            let duration_str = format!("{:.3}", duration);
+            format!("color=c=black:s=1920x1080:d={},fps=30[v]", duration_str)
         } else if has_independent_audio_trim {
             // Apply video trim using filter
             needs_filter = true;
-            if let (Some(start), Some(end)) = (clip.trim_start, clip.trim_end) {
+            if let (Some(start), Some(end)) = (trim_start, trim_end) {
                 format!("[0:v]trim=start={}:end={},setpts=PTS-STARTPTS[v]", start, end)
             } else {
                 "[0:v]null[v]".to_string()
@@ -513,9 +629,12 @@ fn export_multi_clip(options: MultiClipExportOptions) -> Result<String, String> 
         filter_parts.push(video_filter);
 
         // Handle audio
-        let audio_filter = if is_audio_muted {
+        let audio_filter = if !has_audio || is_audio_muted {
+            // No audio stream or audio is muted - generate silent audio
             needs_filter = true;
-            format!("anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration={}[a]", duration)
+            let duration_str = format!("{:.3}", duration);
+            log::info!("Clip {} generating silent audio with duration: {} (formatted as {})", i, duration, duration_str);
+            format!("anullsrc=channel_layout=stereo:sample_rate=44100:duration={}[a]", duration_str)
         } else if has_independent_audio_trim {
             // Apply audio-specific trim
             needs_filter = true;
@@ -533,6 +652,8 @@ fn export_multi_clip(options: MultiClipExportOptions) -> Result<String, String> 
                 audio_chain.push_str("[a]");
                 audio_chain
             } else {
+                // If no trim specified, still use audio but ensure we're using filter mode
+                needs_filter = true;
                 "[0:a]anull[a]".to_string()
             }
         } else if !is_audio_linked && audio_offset != 0.0 {
@@ -545,13 +666,19 @@ fn export_multi_clip(options: MultiClipExportOptions) -> Result<String, String> 
             } else {
                 "[0:a]anull[a]".to_string()
             }
-        } else {
+        } else if has_audio {
+            // Has audio but no special processing - use pass-through filter for consistency
+            needs_filter = true;
             "[0:a]anull[a]".to_string()
+        } else {
+            // Fallback: generate silent audio
+            needs_filter = true;
+            format!("anullsrc=channel_layout=stereo:sample_rate=44100:duration={}[a]", duration)
         };
         filter_parts.push(audio_filter);
 
         // Add filter_complex and map outputs
-        if needs_filter || is_video_muted || is_audio_muted || (!is_audio_linked && audio_offset != 0.0) {
+        if needs_filter || is_video_muted || is_audio_muted || (!is_audio_linked && audio_offset != 0.0) || !has_audio {
             let filter_str = filter_parts.join(";");
             cmd.arg("-filter_complex").arg(&filter_str);
             cmd.arg("-map").arg("[v]");
@@ -559,12 +686,15 @@ fn export_multi_clip(options: MultiClipExportOptions) -> Result<String, String> 
         } else {
             // No special processing needed, use default mapping
             cmd.arg("-map").arg("0:v");
-            cmd.arg("-map").arg("0:a");
+            if has_audio {
+                cmd.arg("-map").arg("0:a");
+            }
         }
 
         // Output options - re-encode to ensure compatibility
+        // Use ultrafast preset for temp files to speed up processing
         cmd.arg("-c:v").arg("libx264")
-            .arg("-preset").arg("fast")
+            .arg("-preset").arg("ultrafast")
             .arg("-crf").arg("23")
             .arg("-c:a").arg("aac")
             .arg("-b:a").arg("128k")
@@ -580,11 +710,36 @@ fn export_multi_clip(options: MultiClipExportOptions) -> Result<String, String> 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             log::error!("FFmpeg failed for clip {}: {}", i, stderr);
+
             // Clean up temp files
             for temp_file in &temp_files {
                 let _ = std::fs::remove_file(temp_file);
             }
-            return Err(format!("FFmpeg export failed for clip {}: {}", i, stderr));
+
+            // Parse error and provide user-friendly message
+            let error_msg = if stderr.contains("Could not open encoder before EOF") || stderr.contains("Invalid argument") {
+                format!("Failed to process clip {} due to audio/video sync issues. This can happen with very short clips or corrupted files. Try adjusting the clip boundaries slightly.", i + 1)
+            } else if stderr.contains("No such file or directory") {
+                format!("Clip {} file not found. The source video may have been moved or deleted.", i + 1)
+            } else if stderr.contains("Invalid data found") {
+                format!("Clip {} appears to be corrupted or in an unsupported format.", i + 1)
+            } else if stderr.contains("Permission denied") {
+                format!("Permission denied while processing clip {}. Check file permissions.", i + 1)
+            } else {
+                // Extract just the key error lines instead of dumping everything
+                let key_errors: Vec<&str> = stderr.lines()
+                    .filter(|line| line.contains("Error") || line.contains("failed") || line.contains("Invalid"))
+                    .take(3)  // Only show first 3 error lines
+                    .collect();
+
+                if !key_errors.is_empty() {
+                    format!("Failed to process clip {}: {}", i + 1, key_errors.join("; "))
+                } else {
+                    format!("Failed to process clip {}. Check the logs for details.", i + 1)
+                }
+            };
+
+            return Err(error_msg);
         }
 
         temp_files.push(temp_path);
@@ -604,6 +759,13 @@ fn export_multi_clip(options: MultiClipExportOptions) -> Result<String, String> 
     drop(concat_file); // Close the file
 
     log::info!("Created concat file: {:?}", concat_file_path);
+
+    // Emit progress for concatenation step
+    let _ = window.emit("merge-progress", MergeProgress {
+        current: options.clips.len(),
+        total: options.clips.len(),
+        status: "Merging clips together...".to_string(),
+    });
 
     // Step 3: Concat all clips
     let ffmpeg = find_ffmpeg();
@@ -1704,7 +1866,7 @@ pub struct GoogleDriveMultiClipExportOptions {
 }
 
 #[tauri::command]
-async fn export_multi_clip_to_google_drive(options: GoogleDriveMultiClipExportOptions) -> Result<String, String> {
+async fn export_multi_clip_to_google_drive(options: GoogleDriveMultiClipExportOptions, window: tauri::Window) -> Result<String, String> {
     log::info!("Starting multi-clip Google Drive export: {}", options.filename);
 
     // First, export the multi-clip video locally to a temp file
@@ -1718,7 +1880,7 @@ async fn export_multi_clip_to_google_drive(options: GoogleDriveMultiClipExportOp
     export_multi_clip(MultiClipExportOptions {
         clips: options.clips,
         output_path: temp_output_str.clone(),
-    })?;
+    }, window)?;
 
     // Get or create ClipForge folder
     let folder_id = get_or_create_clipforge_folder(&options.api_key).await?;
